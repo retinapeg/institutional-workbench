@@ -169,6 +169,10 @@ def main() -> int:
                 explain_routing=args.explain_routing,
             ).run()
             print("\n" + state["status"])
+            if "qa_status" in state:
+                print("QA_STATUS=" + state["qa_status"])
+                if state.get("qa_failure"):
+                    print("QA_FAILURE=" + state["qa_failure"])
             if state["status"] == "PAUSED":
                 for heading, value in state["checkpoint"].items():
                     print(heading + ": " + str(value))

@@ -13,6 +13,35 @@ from institutional_workbench.cli import main
 
 
 class CliErgonomicsTests(unittest.TestCase):
+    def test_degraded_qa_warning_is_prominent_in_final_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            output = io.StringIO()
+            with (
+                patch("pathlib.Path.cwd", return_value=repo),
+                patch.object(sys, "argv", ["inst", "hackathon", "demo"]),
+                patch("institutional_workbench.cli.Workbench") as workbench,
+                contextlib.redirect_stdout(output),
+            ):
+                workbench.return_value.run.return_value = {
+                    "status": "DELIVERED",
+                    "qa_status": "UNVERIFIED",
+                    "qa_failure": "Sonnet timed out after 90s",
+                    "deliverable": "demo",
+                    "tests": [],
+                    "run_command": "python demo.py",
+                    "files_changed": [],
+                    "limitations": [],
+                    "pitch_outline": [],
+                    "fallback": "",
+                }
+                self.assertEqual(main(), 0)
+            self.assertIn(
+                "DELIVERED\nQA_STATUS=UNVERIFIED\nQA_FAILURE=Sonnet timed out after 90s",
+                output.getvalue(),
+            )
+
     def test_hackathon_default_is_soft_and_explicit_deadline_is_hard(self):
         for flags, hard in (([], False), (["--hard-deadline", "25"], True)):
             with tempfile.TemporaryDirectory() as directory:

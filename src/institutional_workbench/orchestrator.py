@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import shlex
 import sys
 import threading
@@ -31,6 +32,10 @@ T = TypeVar("T", bound=BaseModel)
 
 class DeliberationClosed(Blocked):
     pass
+
+
+class QAUnavailable(Blocked):
+    """The reviewer failed operationally, not a verdict about the implementation."""
 
 
 POLICIES = {
@@ -211,7 +216,13 @@ class Workbench:
                 **context,
             }
         )
-        result = self.provider.ask(provider, prompt, schema)
+        try:
+            result = self.provider.ask(provider, prompt, schema)
+        except (Blocked, OSError, ValueError) as exc:
+            self.runner.check()
+            if schema is QAResult:
+                raise QAUnavailable(str(exc)) from exc
+            raise
         (self.run_dir / "reports" / f"{self.state['calls']:02d}-{schema.__name__}.json").write_text(
             result.model_dump_json(indent=2)
         )
@@ -339,6 +350,13 @@ class Workbench:
                 record["failure"] = str(exc)
                 runner.check()  # Cancellation/deadline never becomes a model escalation.
                 if attempt or not route.escalation_allowed:
+                    if schema is QAResult and not record["schema_success"]:
+                        failures = [
+                            f"{row['selected_provider']}/{row['selected_model']}: {row['failure']}"
+                            for row in self.invocations
+                            if row["task_or_phase"] == phase and "failure" in row
+                        ]
+                        raise QAUnavailable("; ".join(failures)) from exc
                     raise
                 previous, trigger = route, str(exc)
                 model_failure = not record["schema_success"]
@@ -533,6 +551,26 @@ class Workbench:
             target.write_text(change.content)
             self.changed.add(change.path)
 
+    def repair_candidate(
+        self, decision: Decision, protected: set[str], qa: QAResult | None
+    ) -> RepairResult:
+        self.state["repairs"] += 1
+        fix = self.ask(
+            "FIX",
+            self.builder,
+            {
+                "decision": decision.model_dump(),
+                "snapshot": self.snapshot(self.work),
+                "test_results": self.test_results,
+                "qa": qa.model_dump() if qa is not None else None,
+                "demo": self.state.get("demo"),
+                "instruction": "Fix only the listed blockers. Existing and QA tests are immutable. Return full changed file contents; no architecture reopening.",
+            },
+            RepairResult,
+        )
+        self.apply(fix.files, protected=protected)
+        return fix
+
     def run(self) -> dict[str, Any]:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         (self.run_dir / "reports").mkdir(exist_ok=True)
@@ -723,37 +761,73 @@ class Workbench:
             }
             self.apply(build.files, protected=protected)
             passed = self.test()
-            qa = self.ask(
-                "6/7 RED TEAM",
-                self.builder if self.quick else self.reviewer,
-                {
-                    "decision": decision.model_dump(),
-                    "snapshot": self.snapshot(self.work),
-                    "diff": self.git("diff", cwd=self.work),
-                    "test_results": self.test_results,
-                    "demo": self.state.get("demo"),
-                    "instruction": "Review ACTUAL implementation against acceptance. test_results and demo are host-executed receipts, not model claims; you need not execute them yourself. One pass. Only critical/high-value blockers. If critical findings require repairs, supply independent regression test files runnable by the frozen commands. Do not reopen architecture.",
-                },
-                QAResult,
+            # Hackathon spends its existing repair before asking QA about failing software.
+            if self.mode == "hackathon" and not passed:
+                build = self.repair_candidate(decision, protected, None)
+                passed = self.test()
+                if not passed:
+                    raise Blocked("Executable/demo acceptance still fails after 1 repair cycle")
+            qa: QAResult | None = None
+            self.state.update(qa_status="UNVERIFIED", qa_failure=None)
+            try:
+                qa = self.ask(
+                    "6/7 RED TEAM",
+                    self.builder if self.quick else self.reviewer,
+                    {
+                        "decision": decision.model_dump(),
+                        "snapshot": self.snapshot(self.work),
+                        "diff": self.git("diff", cwd=self.work),
+                        "test_results": self.test_results,
+                        "demo": self.state.get("demo"),
+                        "instruction": "Review ACTUAL implementation against acceptance. test_results and demo are host-executed receipts, not model claims; you need not execute them yourself. One pass. Only critical/high-value blockers. If critical findings require repairs, supply independent regression test files runnable by the frozen commands. Do not reopen architecture.",
+                    },
+                    QAResult,
+                )
+            except QAUnavailable as exc:
+                self.runner.check()  # User cancellation and explicit deadlines still win.
+                self.state["qa_failure"] = str(exc)
+                safety_required = re.search(
+                    r"\b(safety|security)\b",
+                    self.objective + " " + " ".join(decision.acceptance_criteria),
+                    re.IGNORECASE,
+                )
+                if self.mode != "hackathon" or not passed or safety_required:
+                    raise
+                self.event("6/7 RED TEAM", "QA_STATUS=UNVERIFIED; QA_FAILURE=" + str(exc))
+            if qa is not None:
+                self.state["qa_status"] = (
+                    "VERIFIED"
+                    if qa.verdict == "PASS" and qa.acceptance_met and not qa.critical_findings
+                    else "FINDINGS"
+                )
+            qa_limitations = (
+                qa.limitations
+                if qa is not None
+                else [
+                    "QA_STATUS=UNVERIFIED: model QA did not complete. QA_FAILURE="
+                    + str(self.state["qa_failure"])
+                ]
             )
-            if qa.verdict == "BLOCKED":
+            if qa is not None and qa.verdict == "BLOCKED":
                 raise Blocked("QA blocker: " + "; ".join(qa.critical_findings))
-            if not qa.acceptance_met and not qa.regression_tests:
+            if qa is not None and not qa.acceptance_met and not qa.regression_tests:
                 raise Blocked(
                     "QA could not establish acceptance; no executable regression evidence was supplied"
                 )
-            if qa.regression_tests:
+            if qa is not None and qa.regression_tests:
                 if any(not change.path.startswith("tests/test") for change in qa.regression_tests):
                     raise Blocked("QA may add only tests/test* regression files")
                 self.apply(qa.regression_tests, protected=set(self.snapshot(self.work)))
                 protected.update(change.path for change in qa.regression_tests)
                 passed = self.test()
-            if qa.critical_findings and not qa.regression_tests:
+            if qa is not None and qa.critical_findings and not qa.regression_tests:
                 raise Blocked(
                     "QA found critical issues without executable regression evidence: "
                     + "; ".join(qa.critical_findings)
                 )
-            needs_fix = not passed or qa.verdict == "FIX" or not qa.acceptance_met
+            needs_fix = not passed or (
+                qa is not None and (qa.verdict == "FIX" or not qa.acceptance_met)
+            )
             if self.routing and needs_fix:
                 for record in reversed(self.invocations):
                     if record["specialist_role"] == "Builder" and record["success"]:
@@ -761,29 +835,15 @@ class Workbench:
                         break
                 self.write_telemetry()
             repair_limit = 1 if self.mode == "hackathon" else 2
-            for _ in range(repair_limit):
+            for _ in range(repair_limit - self.state["repairs"]):
                 if not needs_fix:
                     break
-                self.state["repairs"] += 1
-                fix = self.ask(
-                    "FIX",
-                    self.builder,
-                    {
-                        "decision": decision.model_dump(),
-                        "snapshot": self.snapshot(self.work),
-                        "test_results": self.test_results,
-                        "qa": qa.model_dump(),
-                        "demo": self.state.get("demo"),
-                        "instruction": "Fix only the listed blockers. Existing and QA tests are immutable. Return full changed file contents; no architecture reopening.",
-                    },
-                    RepairResult,
-                )
-                self.apply(fix.files, protected=protected)
+                fix = self.repair_candidate(decision, protected, qa)
                 build = fix
                 passed = self.test()
-                needs_fix = not passed or not set(qa.critical_findings) <= set(
-                    fix.resolved_findings
-                )
+                needs_fix = not passed or not set(
+                    qa.critical_findings if qa is not None else []
+                ) <= set(fix.resolved_findings)
             if needs_fix:
                 raise Blocked(
                     f"Acceptance still fails after {repair_limit} repair cycles. See output/tests.json"
@@ -810,7 +870,7 @@ class Workbench:
                 self.state.update(
                     tests=self.test_results,
                     run_command=build.run_command,
-                    limitations=build.limitations + qa.limitations,
+                    limitations=build.limitations + qa_limitations,
                     files_changed=sorted(self.changed),
                     delivery_patch=str(patch_path),
                 )
@@ -826,7 +886,7 @@ class Workbench:
                 files_changed=changed,
                 tests=self.test_results,
                 run_command=build.run_command,
-                limitations=build.limitations + qa.limitations,
+                limitations=build.limitations + qa_limitations,
                 pitch_outline=build.pitch_outline,
                 fallback=build.fallback,
                 patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),

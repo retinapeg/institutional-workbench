@@ -224,7 +224,7 @@ class RoutedDeliveryTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
 
-    def qa_failure_bench(self, failures, **options):
+    def qa_failure_bench(self, failures, second_error=None, **options):
         class InvalidQA(RoutedFake):
             qa_attempts = 0
 
@@ -233,6 +233,8 @@ class RoutedDeliveryTests(unittest.TestCase):
                     self.qa_attempts += 1
                     if self.qa_attempts <= failures:
                         self.calls.append((provider, schema.__name__, json.loads(prompt)))
+                        if self.qa_attempts == 2 and second_error is not None:
+                            raise second_error
                         return QAResult.model_validate_json('{"verdict":"not-a-verdict"}')
                 return super().ask(provider, prompt, schema, model=model)
 
@@ -243,6 +245,7 @@ class RoutedDeliveryTests(unittest.TestCase):
         bench, fake = self.qa_failure_bench(1)
         result = bench.run()
         self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual(result["qa_status"], "VERIFIED")
         self.assertEqual(result["repairs"], 0)
         qa = [r for r in bench.invocations if r["task_or_phase"] == "6/7 RED TEAM"]
         self.assertEqual(len(qa), 2)
@@ -254,23 +257,109 @@ class RoutedDeliveryTests(unittest.TestCase):
         self.assertEqual([c[1] for c in fake.calls].count("ExpertReport"), 3)
         self.assertEqual([c[1] for c in fake.calls].count("Challenge"), 3)
 
-    def test_second_invalid_qa_blocks_without_repair_or_third_model_call(self):
+    def test_second_invalid_qa_delivers_unverified_without_third_call(self):
+        bench, fake = self.qa_failure_bench(2)
+        result = bench.run()
+        self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual(result["qa_status"], "UNVERIFIED")
+        self.assertIn("validation", result["qa_failure"])
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 0))
+        self.assertEqual((self.fixture.repo / "app.py").read_text(), "VALUE = 42\n")
+
+    def test_malformed_then_timeout_delivers_verified_code_not_verified_qa(self):
+        bench, fake = self.qa_failure_bench(2, Blocked("Command timed out after 90s: claude"))
+        result = bench.run()
+        self.assertEqual((result["status"], result["qa_status"]), ("DELIVERED", "UNVERIFIED"))
+        self.assertIn("claude/haiku:", result["qa_failure"])
+        self.assertIn("claude/sonnet: Command timed out after 90s: claude", result["qa_failure"])
+        self.assertTrue(any("QA_STATUS=UNVERIFIED" in item for item in result["limitations"]))
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 0))
+
+    def test_failed_tests_repair_before_qa_and_cannot_degrade_delivery(self):
+        bench, fake = self.qa_failure_bench(2, bad_build=True, repairs_fail=True)
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (0, 1))
+        self.assertEqual((self.fixture.repo / "app.py").read_text(), "VALUE = 0\n")
+
+    def test_failing_configured_demo_cannot_degrade_delivery(self):
+        (self.fixture.repo / "demo.py").write_text("raise SystemExit(1)\n")
+        self.fixture.git("add", "demo.py")
+        self.fixture.git("commit", "-m", "failing demo gate")
         bench, fake = self.qa_failure_bench(2)
         result = bench.run()
         self.assertEqual(result["status"], "BLOCKED")
-        self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 0))
-        self.assertEqual((self.fixture.repo / "app.py").read_text(), "VALUE = 0\n")
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (0, 1))
+
+    def test_repaired_executable_gates_can_deliver_without_available_reviewer(self):
+        bench, fake = self.qa_failure_bench(2, bad_build=True)
+        result = bench.run()
+        self.assertEqual((result["status"], result["qa_status"]), ("DELIVERED", "UNVERIFIED"))
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 1))
+        phases = [call[1] for call in fake.calls]
+        self.assertLess(phases.index("RepairResult"), phases.index("QAResult"))
+
+    def test_real_qa_defect_with_failed_repair_cannot_degrade_delivery(self):
+        bench, fake = self.qa_failure_bench(0, qa_fix=True, repairs_fail=True)
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["qa_status"], "FINDINGS")
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (1, 1))
+
+    def test_hard_deadline_during_qa_is_not_degraded_delivery(self):
+        bench, fake = self.qa_failure_bench(2)
+        original = fake.ask
+
+        def deadline(provider, prompt, schema, **kwargs):
+            if schema is QAResult:
+                bench.runner.deadline = 0
+            return original(provider, prompt, schema, **kwargs)
+
+        fake.ask = deadline
+        result = bench.run()
+        self.assertEqual(result["status"], "DEADLINE")
+        self.assertEqual(fake.qa_attempts, 1)
+
+    def test_required_security_review_cannot_degrade_delivery(self):
+        bench, fake = self.qa_failure_bench(2)
+        bench.objective += "; security review is a required hard gate"
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(fake.qa_attempts, 2)
+
+    def test_engineering_reviewer_failure_still_blocks(self):
+        bench, fake = self.qa_failure_bench(2)
+        bench.mode = "engineering"
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(fake.qa_attempts, 2)
+
+    def test_cancel_during_qa_is_not_degraded_delivery(self):
+        bench, fake = self.qa_failure_bench(2)
+        original = fake.ask
+
+        def cancel(provider, prompt, schema, **kwargs):
+            if schema is QAResult:
+                bench.runner.cancel_file.touch()
+            return original(provider, prompt, schema, **kwargs)
+
+        fake.ask = cancel
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("Cancelled", result["current_blocker"])
+        self.assertEqual(fake.qa_attempts, 1)
 
     def test_successful_haiku_qa_does_not_escalate(self):
         bench, fake = self.qa_failure_bench(0)
         result = bench.run()
         self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual(result["qa_status"], "VERIFIED")
         self.assertEqual((fake.qa_attempts, result["repairs"]), (1, 0))
         self.assertEqual(bench.invocations[-1]["selected_model"], "haiku")
         self.assertIsNone(bench.invocations[-1]["escalation_from"])
 
     def test_model_escalation_and_real_defect_use_separate_budgets(self):
-        bench, fake = self.qa_failure_bench(1, bad_build=True, qa_fix=True)
+        bench, fake = self.qa_failure_bench(1, qa_fix=True)
         result = bench.run()
         self.assertEqual(result["status"], "DELIVERED")
         self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 1))
@@ -350,7 +439,7 @@ class RoutedDeliveryTests(unittest.TestCase):
         self.assertLessEqual(result["calls"], 16)
         self.assertLessEqual(result["repairs"], 2)
         self.assertLessEqual(result["repairs"], 1)
-        self.assertEqual(sum(r["task_or_phase"] == "6/7 RED TEAM" for r in bench.invocations), 1)
+        self.assertEqual(sum(r["task_or_phase"] == "6/7 RED TEAM" for r in bench.invocations), 0)
 
     def test_deadline_never_becomes_an_escalation(self):
         bench = self.fixture.bench(RoutedFake(), routing=True)
