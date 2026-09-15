@@ -216,6 +216,22 @@ def select_specialists(profile: TaskProfile, mode: Mode, *, maximum: int = 4) ->
         for role, (tag, _, _) in LENSES.items()
         if tag in profile.domain_tags and role not in priority
     ]
+    if mode == "hackathon":
+        maximum = min(
+            maximum,
+            2
+            if profile.difficulty in {"trivial", "low"}
+            else 4
+            if profile.difficulty in {"high", "frontier"}
+            else 3,
+        )
+        domain_roles = [
+            role
+            for role in priority
+            if LENSES[role][0]
+            in {"physics", "mathematics", "statistics", "data", "systems", "security"}
+        ]
+        priority = domain_roles + [role for role in priority if role not in domain_roles]
     if len(priority) < 2:
         priority.append("Product Engineer")
     return [

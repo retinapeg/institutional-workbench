@@ -16,7 +16,7 @@ $ARGUMENTS
 1. If the task is empty, ask for it. Otherwise run pwd and remember that absolute current directory.
 2. Run mktemp /tmp/inst-hackathon-task.XXXXXX. With Write, put ONLY the task text above into that
    file, unchanged: no paraphrase, extra instructions, markup, escaping or shell interpolation.
-3. Run the following ONCE with Bash timeout=1020000 and run_in_background=false (omit that
+3. Run the following ONCE with Bash timeout=3720000 and run_in_background=false (omit that
    field if unavailable). Never use &, nohup, a detached task, or a second launch.
    Substitute only the two absolute paths, quoted:
 
@@ -33,6 +33,7 @@ The target must be a Git repository with a commit and a detectable test command.
 dirty work and bounds execution. No automatic push, merge, deployment or account-setting changes.
 
 Installation requires Claude's CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 and
-BASH_DEFAULT_TIMEOUT_MS=BASH_MAX_TIMEOUT_MS=1020000 in its startup environment/settings.
+BASH_DEFAULT_TIMEOUT_MS=BASH_MAX_TIMEOUT_MS=3720000 in its startup environment/settings.
 Restart Claude after installation. These keep the foreground tool attached beyond the engine's
-existing 15-minute deadline; they do not extend or alter the engine's budget.
+configured deadline (up to 60 minutes); they do not extend the engine's budget.
+The engine reads an explicit task deadline such as "in 25 minutes"; otherwise its default is 15.

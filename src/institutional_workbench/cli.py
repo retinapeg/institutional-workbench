@@ -1,6 +1,7 @@
 import argparse
 import fcntl
 import json
+import re
 import signal
 import subprocess
 import time
@@ -10,6 +11,13 @@ from .orchestrator import Workbench
 from .providers import CliProviders
 from .routing import ALIASES, Router
 from .runner import Blocked, Runner
+
+
+def task_minutes(task: str) -> float:
+    match = re.search(
+        r"\b(?:in|within|budget(?: of)?)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?)\b", task, re.I
+    )
+    return float(match.group(1)) if match else 15
 
 
 def main() -> int:
@@ -39,12 +47,18 @@ def main() -> int:
         action="append",
         help="Approved acceptance command; repeat for lint/build/demo checks",
     )
-    parser.add_argument("--minutes", type=float, default=15)
+    parser.add_argument(
+        "--minutes", type=float, help="Time budget; overrides an explicit deadline in task text"
+    )
     args = parser.parse_args()
     if args.task_file:
         if args.task is not None:
             parser.error("Use a task argument or --task-file, not both")
         args.task = args.task_file.read_text(encoding="utf-8")
+    if args.minutes is None:
+        args.minutes = (
+            task_minutes(args.task or "") if args.command in {"hack", "hackathon"} else 15
+        )
     if not 0 < args.minutes <= 60:
         parser.error("--minutes must be between 0 and 60")
     try:

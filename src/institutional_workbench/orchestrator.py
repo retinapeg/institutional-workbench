@@ -5,14 +5,16 @@ import json
 import os
 import shlex
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
 from .models import BuildTask, Challenge, Decision, ExpertReport, FileChange, QAResult, RepairResult
-from .providers import Provider
+from .providers import CliProviders, Provider
 from .routing import (
     ALIASES,
     MODE_TEXT,
@@ -55,6 +57,11 @@ class Workbench:
         explain_routing: bool = False,
     ):
         self.repo, self.run_dir, self.runner, self.provider = repo, run_dir, runner, provider
+        self.lock = threading.RLock()
+        self.clock_start = time.monotonic()
+        self.budget_seconds = max(0.0, runner.deadline - self.clock_start)
+        self.build_deadline = self.clock_start + self.budget_seconds * 0.20
+        self.demo_command: list[str] = []
         self.mode, self.objective = cast(Mode, ALIASES.get(mode, mode)), objective
         self.routing = routing
         self.router = router or Router(self.mode)
@@ -85,6 +92,10 @@ class Workbench:
             "started": time.time(),
             "run_dir": str(run_dir),
             "repository": str(repo),
+            "budget_seconds": self.budget_seconds,
+            "time_to_build_start": None,
+            "time_to_first_passing_test": None,
+            "time_to_working_demo": None,
             "experts": [
                 {"role": role, "provider": provider, "question": question}
                 for role, provider, question in self.experts
@@ -122,21 +133,23 @@ class Workbench:
         return roles
 
     def save(self) -> None:
-        target = self.run_dir / "run.json"
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self.state, indent=2) + "\n")
-        os.replace(temporary, target)
+        with self.lock:
+            target = self.run_dir / "run.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.state, indent=2) + "\n")
+            os.replace(temporary, target)
 
     def event(self, phase: str, action: str, **details: Any) -> None:
-        self.state.update(current_phase=phase, next_build_action=action)
-        self.save()
-        with (self.run_dir / "events.jsonl").open("a") as output:
-            output.write(
-                json.dumps({"time": time.time(), "phase": phase, "action": action, **details})
-                + "\n"
-            )
-            output.flush()
-        print(f"[{phase}] {action}", flush=True)
+        with self.lock:
+            self.state.update(current_phase=phase, next_build_action=action)
+            self.save()
+            with (self.run_dir / "events.jsonl").open("a") as output:
+                output.write(
+                    json.dumps({"time": time.time(), "phase": phase, "action": action, **details})
+                    + "\n"
+                )
+                output.flush()
+            print(f"[{phase}] {action}", flush=True)
 
     def git(self, *args: str, cwd: Path | None = None) -> str:
         return self.runner.run(["git", *args], cwd or self.repo)[1].strip()
@@ -174,7 +187,21 @@ class Workbench:
         self.event(phase, f"{provider} finished", usage=getattr(self.provider, "last_usage", {}))
         return result
 
-    def ask_routed(self, phase: str, preferred: str, context: dict[str, Any], schema: type[T]) -> T:
+    def ask_routed(
+        self,
+        phase: str,
+        preferred: str,
+        context: dict[str, Any],
+        schema: type[T],
+        *,
+        deadline: float | None = None,
+    ) -> T:
+        runner, client = self.runner, self.provider
+        if deadline is not None:
+            runner = Runner(self.runner.cancel_file)
+            runner.deadline = min(self.runner.deadline, deadline)
+            if isinstance(client, CliProviders):
+                client = CliProviders(runner, client.models["claude"], client.models["codex"])
         role = str(
             context.get(
                 "role",
@@ -207,9 +234,12 @@ class Workbench:
         for attempt in range(
             2
         ):  # At most one local escalation; separate from implementation repair.
-            self.runner.check()
-            if self.state["calls"] >= self.state["max_calls"]:
-                raise Blocked("Model-call cap reached; no further routing")
+            runner.check()
+            with self.lock:
+                if self.state["calls"] >= self.state["max_calls"]:
+                    raise Blocked("Model-call cap reached; no further routing")
+                self.state["calls"] += 1
+                call_id = self.state["calls"]
             route = self.router.choose(
                 local_profile,
                 phase,
@@ -220,8 +250,6 @@ class Workbench:
                 trigger=trigger,
                 model_failure=model_failure,
             )
-            self.state["calls"] += 1
-            call_id = self.state["calls"]
             self.event(
                 phase,
                 f"{role} · {route.selected_provider}/{route.selected_model}",
@@ -246,7 +274,8 @@ class Workbench:
                 "reported_cost_usd": None,
                 "actual_monetary_spend": None,
             }
-            self.invocations.append(record)
+            with self.lock:
+                self.invocations.append(record)
             self.write_telemetry()
             prompt = json.dumps(
                 {
@@ -257,7 +286,7 @@ class Workbench:
                 }
             )
             try:
-                result = self.provider.ask(
+                result = client.ask(
                     route.selected_provider, prompt, schema, model=route.selected_model
                 )
                 record["schema_success"] = True
@@ -277,14 +306,14 @@ class Workbench:
                 return result
             except (Blocked, OSError, ValueError) as exc:
                 record["failure"] = str(exc)
-                self.runner.check()  # Cancellation/deadline never becomes a model escalation.
+                runner.check()  # Cancellation/deadline never becomes a model escalation.
                 if attempt or not route.escalation_allowed:
                     raise
                 previous, trigger = route, str(exc)
                 model_failure = not record["schema_success"]
             finally:
                 record.update(ended=time.time(), wall_seconds=round(time.time() - started, 3))
-                usage = getattr(self.provider, "last_usage", {})
+                usage = getattr(client, "last_usage", {})
                 tokens = usage.get("usage", {})
                 record.update(
                     input_tokens=tokens.get("input_tokens"),
@@ -296,10 +325,58 @@ class Workbench:
         raise Blocked("Bounded route exhausted")
 
     def write_telemetry(self) -> None:
-        target = self.run_dir / "invocations.json"
-        temporary = target.with_suffix(".tmp")
-        temporary.write_text(json.dumps(self.invocations, indent=2) + "\n")
-        os.replace(temporary, target)
+        with self.lock:
+            target = self.run_dir / "invocations.json"
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.invocations, indent=2) + "\n")
+            os.replace(temporary, target)
+
+    def consult(
+        self, phase: str, contexts: list[dict[str, Any]], schema: type[T], deadline: float
+    ) -> list[dict[str, Any]]:
+        """One bounded parallel round; only the coordinator owns files/code."""
+
+        def one(item: tuple[tuple[str, str, str], dict[str, Any]]) -> dict[str, Any] | None:
+            expert, context = item
+            try:
+                return self.ask_routed(
+                    phase, expert[1], context, schema, deadline=deadline
+                ).model_dump()
+            except Blocked:
+                self.runner.check()
+                if time.monotonic() < deadline:
+                    raise
+                self.event(
+                    "DELIBERATION CUTOFF", f"{expert[0]} unfinished; build with available evidence"
+                )
+                return None
+
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(contexts)))) as pool:
+            return [
+                report
+                for report in pool.map(one, zip(self.experts, contexts))
+                if report is not None
+            ]
+
+    def deadline_decision(
+        self, reports: list[dict[str, Any]], challenges: list[dict[str, Any]]
+    ) -> Decision:
+        return Decision(
+            deliverable=self.objective,
+            acceptance_criteria=[
+                "Requested behaviour implemented",
+                "Frozen tests and demo checks pass",
+            ],
+            agreed=[],
+            disputed=[str(c["disagreement"]) for c in challenges if c["disagreement"]],
+            unknown=[
+                "Deliberation deadline reached; incomplete specialist evidence is not consensus"
+            ],
+            decision="Build the smallest requested vertical slice now; no further deliberation.",
+            build_plan=[str(r["recommended_action"]) for r in reports[:4]]
+            or ["Implement the stated objective and its deterministic acceptance tests"],
+            winning_demo_moment=self.objective,
+        )
 
     def snapshot(self, directory: Path) -> dict[str, str]:
         paths = self.git(
@@ -354,6 +431,17 @@ class Workbench:
         if not self.commands:
             raise Blocked('No test command detected. Retry with --test "your acceptance command"')
 
+    def freeze_demo_command(self) -> None:
+        if self.mode != "hackathon":
+            return
+        python = self.repo / ".venv/bin/python"
+        executable = str(python) if python.is_file() else sys.executable
+        if (self.work / "DEMO_COMMAND").is_file():
+            self.demo_command = shlex.split((self.work / "DEMO_COMMAND").read_text())
+        elif (self.work / "demo.py").is_file():
+            self.demo_command = [executable, "demo.py"]
+        self.state["demo_command"] = self.demo_command
+
     def test(self) -> bool:
         self.event("5/7 TEST", "Running frozen acceptance commands")
         self.test_results = []
@@ -366,6 +454,18 @@ class Workbench:
             item["exit_code"] == 0 and "Ran 0 tests" not in item["output"]
             for item in self.test_results
         )
+        if passed and self.state["time_to_first_passing_test"] is None:
+            self.state["time_to_first_passing_test"] = round(time.monotonic() - self.clock_start, 3)
+        if self.demo_command:
+            code, out, err = self.runner.run(
+                self.demo_command, self.work, timeout=60, require_success=False
+            )
+            demo = {"command": self.demo_command, "exit_code": code, "output": (out + err)[-20000:]}
+            (self.run_dir / "output/demo.json").write_text(json.dumps(demo, indent=2))
+            self.state["demo"] = demo
+            passed = passed and code == 0
+            if code == 0 and self.state["time_to_working_demo"] is None:
+                self.state["time_to_working_demo"] = round(time.monotonic() - self.clock_start, 3)
         if self.routing:
             for record in reversed(self.invocations):
                 if record["specialist_role"] == "Builder" and record["success"]:
@@ -416,6 +516,7 @@ class Workbench:
             self.state["base_commit"] = base
             self.git("worktree", "add", "--detach", str(self.work), base)
             self.test_commands()
+            self.freeze_demo_command()
             before = self.snapshot(self.work)
             if self.routing:
                 self.profile = profile_task(
@@ -459,44 +560,84 @@ class Workbench:
                     self.state["elapsed_seconds"] = round(time.time() - self.state["started"], 1)
                     self.save()
                     return self.state
-            reports = []
-            for role, provider, question in self.experts:
-                reports.append(
-                    self.ask(
-                        "2/7 INDEPENDENT",
-                        provider,
-                        {"role": role, "jurisdiction": question, "snapshot": before},
-                        ExpertReport,
-                    ).model_dump()
-                )
-            # All initial reports exist before any peer report is revealed.
-            challenges = []
-            for role, provider, question in self.experts:
-                challenges.append(
-                    self.ask(
-                        "2/7 CHALLENGE",
-                        provider,
-                        {
-                            "role": role,
-                            "jurisdiction": question,
-                            "reports": reports,
-                            "instruction": "One flaw/disagreement/missing fact only. No new round.",
-                        },
-                        Challenge,
-                    ).model_dump()
-                )
-            decision = self.ask(
-                "3/7 DECIDE",
-                self.builder if self.quick else self.reviewer,
+            early_build = self.mode == "hackathon" and self.routing
+            contexts: list[dict[str, Any]] = [
                 {
+                    "role": role,
+                    "jurisdiction": question,
                     "snapshot": before,
+                    "instruction": "Brief independent assessment, <=150 words. No peer conclusions.",
+                }
+                for role, _, question in self.experts
+            ]
+            if early_build:
+                reports = self.consult(
+                    "2/7 INDEPENDENT",
+                    contexts,
+                    ExpertReport,
+                    self.clock_start + self.budget_seconds * 0.12,
+                )
+            else:
+                reports = [
+                    self.ask("2/7 INDEPENDENT", expert[1], context, ExpertReport).model_dump()
+                    for expert, context in zip(self.experts, contexts)
+                ]
+            # Reveal only after the independent round has finished.
+            contexts = [
+                {
+                    "role": role,
+                    "jurisdiction": question,
                     "reports": reports,
-                    "challenges": challenges,
-                    "acceptance_commands": self.commands,
-                    "instruction": "Freeze deliverable, scope and testable acceptance now. Preserve disagreement. Build next; no more analysis.",
-                },
-                Decision,
-            )
+                    "instruction": "One flaw/disagreement/missing fact only; <=60 words. No new round.",
+                }
+                for role, _, question in self.experts
+            ]
+            if early_build:
+                challenge_deadline = self.clock_start + self.budget_seconds * 0.16
+                challenges = (
+                    self.consult("2/7 CHALLENGE", contexts, Challenge, challenge_deadline)
+                    if self.profile.difficulty not in {"trivial", "low"}
+                    and time.monotonic() < challenge_deadline
+                    and reports
+                    else []
+                )
+            else:
+                challenges = [
+                    self.ask("2/7 CHALLENGE", expert[1], context, Challenge).model_dump()
+                    for expert, context in zip(self.experts, contexts)
+                ]
+            decision_context = {
+                "snapshot": before,
+                "reports": reports,
+                "challenges": challenges,
+                "acceptance_commands": self.commands,
+                "demo_command": self.demo_command,
+                "instruction": "Freeze deliverable, scope and testable acceptance now. Preserve disagreement. Build next; no more analysis.",
+            }
+            if early_build:
+                try:
+                    decision = self.ask_routed(
+                        "3/7 DECIDE",
+                        self.reviewer,
+                        decision_context,
+                        Decision,
+                        deadline=self.build_deadline,
+                    )
+                except Blocked:
+                    self.runner.check()
+                    if time.monotonic() < self.build_deadline:
+                        raise
+                    decision = self.deadline_decision(reports, challenges)
+                    self.event(
+                        "3/7 DECIDE", "Deliberation cutoff: freeze available evidence and BUILD"
+                    )
+            else:
+                decision = self.ask(
+                    "3/7 DECIDE",
+                    self.builder if self.quick else self.reviewer,
+                    decision_context,
+                    Decision,
+                )
             if (
                 challenges
                 and any(
@@ -515,8 +656,10 @@ class Workbench:
                 "snapshot": before,
                 "decision": decision.model_dump(),
                 "acceptance_commands": self.commands,
+                "demo_command": self.demo_command,
                 "instruction": "BUILD NOW. Return complete contents of only changed files, plus relevant tests. No deletions, hidden files, new dependencies or unrelated features. Existing test files are IMMUTABLE: do not include them in files, even to add tests. Add coverage in NEW test files. No prose-only deliverable.",
             }
+            self.state["time_to_build_start"] = round(time.monotonic() - self.clock_start, 3)
             build = self.ask("4/7 BUILD", self.builder, context, BuildTask)
             if build.question:
                 answer = self.ask(
@@ -552,7 +695,8 @@ class Workbench:
                     "snapshot": self.snapshot(self.work),
                     "diff": self.git("diff", cwd=self.work),
                     "test_results": self.test_results,
-                    "instruction": "Review ACTUAL implementation against acceptance. One pass. Only critical/high-value blockers. If critical findings require repairs, supply independent regression test files runnable by the frozen commands. Do not reopen architecture.",
+                    "demo": self.state.get("demo"),
+                    "instruction": "Review ACTUAL implementation against acceptance. test_results and demo are host-executed receipts, not model claims; you need not execute them yourself. One pass. Only critical/high-value blockers. If critical findings require repairs, supply independent regression test files runnable by the frozen commands. Do not reopen architecture.",
                 },
                 QAResult,
             )
@@ -593,6 +737,7 @@ class Workbench:
                         "snapshot": self.snapshot(self.work),
                         "test_results": self.test_results,
                         "qa": qa.model_dump(),
+                        "demo": self.state.get("demo"),
                         "instruction": "Fix only the listed blockers. Existing and QA tests are immutable. Return full changed file contents; no architecture reopening.",
                     },
                     RepairResult,
@@ -638,6 +783,10 @@ class Workbench:
                 fallback=build.fallback,
                 patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),
             )
+            if self.mode == "hackathon" and not self.demo_command:
+                self.state["limitations"].append(
+                    "No repository-owned demo command detected; only tests verified."
+                )
             self.event("7/7 DELIVERED", build.summary)
         except (Blocked, OSError, ValueError) as exc:
             self.state.update(status="BLOCKED", current_blocker=str(exc))
