@@ -13,6 +13,33 @@ from institutional_workbench.cli import main
 
 
 class CliErgonomicsTests(unittest.TestCase):
+    def test_noop_delivery_prints_no_changes_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            output = io.StringIO()
+            with (
+                patch("pathlib.Path.cwd", return_value=repo),
+                patch.object(sys, "argv", ["inst", "hackathon", "verify demo"]),
+                patch("institutional_workbench.cli.Workbench") as workbench,
+                contextlib.redirect_stdout(output),
+            ):
+                workbench.return_value.run.return_value = {
+                    "status": "DELIVERED",
+                    "build_result": "NO_OP",
+                    "qa_status": "VERIFIED",
+                    "deliverable": "existing demo",
+                    "tests": [],
+                    "run_command": "python demo.py",
+                    "files_changed": [],
+                    "limitations": [],
+                    "pitch_outline": [],
+                    "fallback": "",
+                }
+                self.assertEqual(main(), 0)
+            self.assertIn("BUILD: NO CHANGES REQUIRED", output.getvalue())
+            self.assertNotIn("What changed:", output.getvalue())
+
     def test_degraded_qa_warning_is_prominent_in_final_output(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory).resolve()

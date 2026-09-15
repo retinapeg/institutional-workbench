@@ -751,8 +751,12 @@ class Workbench:
                 )
                 if build.question:
                     raise Blocked("Builder still blocked after its one focused question")
-            if not build.files:
+            if not build.files and self.mode != "hackathon":
                 raise Blocked("Builder returned no implementation")
+            builder_noop = not build.files
+            if builder_noop:
+                self.state["build_result"] = "NO_OP"
+                self.event("4/7 BUILD", "NO_OP candidate; verify existing repository")
             # Existing tests are coordinator-owned acceptance evidence; builder may add tests.
             protected = {
                 name
@@ -853,7 +857,8 @@ class Workbench:
                 raise Blocked(
                     "Original repository changed during the run; verified result remains in isolated workspace"
                 )
-            self.git("add", "--intent-to-add", "--", *sorted(self.changed), cwd=self.work)
+            if self.changed:
+                self.git("add", "--intent-to-add", "--", *sorted(self.changed), cwd=self.work)
             if (
                 set(self.git("diff", "--name-only", "HEAD", cwd=self.work).splitlines())
                 - self.changed
@@ -862,34 +867,38 @@ class Workbench:
                     "Acceptance commands changed unrelated tracked files; refusing delivery"
                 )
             patch = self.runner.run(["git", "diff", "--binary", "HEAD"], self.work)[1]
-            if not patch.strip():
+            no_op = builder_noop and not self.changed and not patch.strip()
+            if not patch.strip() and not no_op:
                 raise Blocked("No deliverable diff exists")
             patch_path = self.run_dir / "output/delivery.patch"
-            patch_path.write_text(patch)
+            if not no_op:
+                patch_path.write_text(patch)
             if self.crunch():
                 self.state.update(
                     tests=self.test_results,
                     run_command=build.run_command,
                     limitations=build.limitations + qa_limitations,
                     files_changed=sorted(self.changed),
-                    delivery_patch=str(patch_path),
+                    delivery_patch=None if no_op else str(patch_path),
                 )
                 self.pause_checkpoint()
                 self.state["elapsed_seconds"] = round(time.time() - self.state["started"], 1)
                 self.save()
                 return self.state
-            self.runner.run(["git", "apply", "--check", str(patch_path)], self.repo)
-            self.runner.run(["git", "apply", str(patch_path)], self.repo)
+            if not no_op:
+                self.runner.run(["git", "apply", "--check", str(patch_path)], self.repo)
+                self.runner.run(["git", "apply", str(patch_path)], self.repo)
             changed = self.git("diff", "--name-only", "HEAD", cwd=self.work).splitlines()
             self.state.update(
                 status="DELIVERED",
+                build_result="NO_OP" if no_op else "CHANGED",
                 files_changed=changed,
                 tests=self.test_results,
                 run_command=build.run_command,
                 limitations=build.limitations + qa_limitations,
                 pitch_outline=build.pitch_outline,
                 fallback=build.fallback,
-                patch_sha256=hashlib.sha256(patch.encode()).hexdigest(),
+                patch_sha256=None if no_op else hashlib.sha256(patch.encode()).hexdigest(),
             )
             if self.mode == "hackathon" and not self.demo_command:
                 self.state["limitations"].append(

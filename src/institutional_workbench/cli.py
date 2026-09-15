@@ -177,7 +177,11 @@ def main() -> int:
                 for heading, value in state["checkpoint"].items():
                     print(heading + ": " + str(value))
             elif state["status"] == "DELIVERED":
-                print("What changed: " + state["deliverable"])
+                if state.get("build_result") == "NO_OP":
+                    print("BUILD: NO CHANGES REQUIRED")
+                    print("Verified result: " + state["deliverable"])
+                else:
+                    print("What changed: " + state["deliverable"])
                 print(
                     "Tests: "
                     + "; ".join(" ".join(t["command"]) + " — passed" for t in state["tests"])

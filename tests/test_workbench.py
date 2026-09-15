@@ -84,6 +84,21 @@ class FakeProvider:
         raise AssertionError(schema)
 
 
+class NoOpProvider(FakeProvider):
+    def ask(self, provider, prompt, schema, *, model=None):
+        if schema is BuildTask:
+            self.calls.append((provider, schema.__name__, json.loads(prompt)))
+            return BuildTask(
+                summary="Existing repository already satisfies the objective",
+                files=[],
+                run_command="python demo.py",
+                limitations=[],
+                pitch_outline=["verified existing demo"],
+                fallback="show passing tests",
+            )
+        return super().ask(provider, prompt, schema)
+
+
 class WorkbenchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -119,6 +134,81 @@ class WorkbenchTests(unittest.TestCase):
             tests=[f"{sys.executable} -m unittest discover -s tests -v"],
             **options,
         )
+
+    def commit_passing_baseline(self, *, demo=False):
+        (self.repo / "app.py").write_text("VALUE = 42\n")
+        if demo:
+            (self.repo / "demo.py").write_text("from app import VALUE\nprint(f'DEMO {VALUE}')\n")
+        self.git("add", "app.py", *(["demo.py"] if demo else []))
+        self.git("commit", "-m", "verified baseline")
+
+    def test_hackathon_structured_noop_runs_tests_demo_qa_and_delivers_without_patch(self):
+        self.commit_passing_baseline(demo=True)
+        base = self.git("rev-parse", "HEAD")
+        fake = NoOpProvider()
+        bench = self.bench(fake, mode="hackathon")
+        result = bench.run()
+        self.assertEqual((result["status"], result["build_result"]), ("DELIVERED", "NO_OP"))
+        self.assertEqual(result["qa_status"], "VERIFIED")
+        self.assertEqual(result["files_changed"], [])
+        self.assertIsNone(result["patch_sha256"])
+        self.assertFalse((bench.run_dir / "output/delivery.patch").exists())
+        self.assertEqual(result["tests"][0]["exit_code"], 0)
+        self.assertEqual(result["demo"]["exit_code"], 0)
+        self.assertIn("DEMO 42", result["demo"]["output"])
+        self.assertEqual([c[1] for c in fake.calls].count("QAResult"), 1)
+        phases = [
+            json.loads(line)["phase"]
+            for line in (bench.run_dir / "events.jsonl").read_text().splitlines()
+        ]
+        self.assertLess(phases.index("5/7 TEST"), phases.index("6/7 RED TEAM"))
+        self.assertEqual(self.git("rev-parse", "HEAD"), base)
+        self.assertEqual(self.git("diff", "--name-only", "HEAD"), "")
+
+    def test_hackathon_noop_failed_tests_uses_existing_one_repair(self):
+        fake = NoOpProvider()
+        result = self.bench(fake, mode="hackathon").run()
+        self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual((result["repairs"], result["build_result"]), (1, "CHANGED"))
+        self.assertEqual((self.repo / "app.py").read_text(), "VALUE = 42\n")
+        self.assertEqual([c[1] for c in fake.calls].count("QAResult"), 1)
+
+    def test_routed_hackathon_structured_noop_keeps_review_and_delivers(self):
+        self.commit_passing_baseline()
+        fake = NoOpProvider()
+        bench = self.bench(fake, mode="hackathon", routing=True)
+        result = bench.run()
+        self.assertEqual((result["status"], result["build_result"]), ("DELIVERED", "NO_OP"))
+        self.assertEqual(result["qa_status"], "VERIFIED")
+        self.assertEqual(result["files_changed"], [])
+        self.assertEqual([c[1] for c in fake.calls].count("BuildTask"), 1)
+        self.assertEqual([c[1] for c in fake.calls].count("QAResult"), 1)
+        self.assertTrue(
+            any(row["specialist_role"] == "Builder" and row["success"] for row in bench.invocations)
+        )
+
+    def test_hackathon_noop_failed_tests_without_successful_repair_blocks(self):
+        fake = NoOpProvider(repairs_fail=True)
+        result = self.bench(fake, mode="hackathon").run()
+        self.assertEqual((result["status"], result["repairs"]), ("BLOCKED", 1))
+        self.assertEqual([c[1] for c in fake.calls].count("QAResult"), 0)
+        self.assertEqual((self.repo / "app.py").read_text(), "VALUE = 0\n")
+
+    def test_malformed_builder_still_blocks_before_tests_and_qa(self):
+        class MalformedBuilder(NoOpProvider):
+            def ask(self, provider, prompt, schema):
+                if schema is BuildTask:
+                    return BuildTask.model_validate({"files": []})
+                return super().ask(provider, prompt, schema)
+
+        self.commit_passing_baseline()
+        fake = MalformedBuilder()
+        bench = self.bench(fake, mode="hackathon")
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertNotIn("build_result", result)
+        self.assertEqual([c[1] for c in fake.calls].count("QAResult"), 0)
+        self.assertFalse((bench.run_dir / "output/tests.json").exists())
 
     def test_delivery_independence_one_challenge_and_immediate_stop(self):
         fake = FakeProvider()
