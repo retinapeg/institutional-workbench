@@ -16,15 +16,23 @@ $ARGUMENTS
 1. If the task is empty, ask for it. Otherwise run pwd and remember that absolute current directory.
 2. Run mktemp /tmp/inst-hackathon-task.XXXXXX. With Write, put ONLY the task text above into that
    file, unchanged: no paraphrase, extra instructions, markup, escaping or shell interpolation.
-3. Run the following once, substituting only the two absolute paths, quoted:
+3. Run the following ONCE with Bash timeout=1020000 and run_in_background=false (omit that
+   field if unavailable). Never use &, nohup, a detached task, or a second launch.
+   Substitute only the two absolute paths, quoted:
 
-   uv run --project /Users/leonardaarons-ditson/Documents/Codex/institutional-workbench-routing inst hackathon --repo "<current-directory>" --task-file "<temporary-task-file>" --explain-routing
+   /Users/leonardaarons-ditson/Documents/Codex/institutional-workbench-routing/.venv/bin/python /Users/leonardaarons-ditson/Documents/Codex/institutional-workbench-routing/claude/hackathon/bridge.py --repo "<current-directory>" --task-file "<temporary-task-file>"
 
-4. Wait for this SAME process through the native task-output mechanism until it exits. Do not
-   launch another run, silently change provider/model flags, fix code yourself, or report a started
-   run as delivered. If permissions are needed, ask normally; never bypass them.
+4. This Bash call must remain foreground until it returns BRIDGE_EXIT=<code>, emitted AFTER
+   the Workbench child exits. Do not produce a final response before that result. A progress
+   message is not completion. Do not silently change provider/model flags or fix code yourself.
+   If permissions are needed, ask normally; never bypass them.
 5. Return its final DELIVERED/BLOCKED status, changes, tests, run command, limitations and evidence
    path concisely. If blocked, report the concrete blocker and STOP. Never automatically retry.
 
 The target must be a Git repository with a commit and a detectable test command. The engine checks
 dirty work and bounds execution. No automatic push, merge, deployment or account-setting changes.
+
+Installation requires Claude's CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 and
+BASH_DEFAULT_TIMEOUT_MS=BASH_MAX_TIMEOUT_MS=1020000 in its startup environment/settings.
+Restart Claude after installation. These keep the foreground tool attached beyond the engine's
+existing 15-minute deadline; they do not extend or alter the engine's budget.
