@@ -4,7 +4,7 @@ import unittest
 import test_workbench as fixtures
 from test_workbench import FakeProvider
 
-from institutional_workbench.models import Challenge
+from institutional_workbench.models import Challenge, QAResult
 from institutional_workbench.providers import CliProviders
 from institutional_workbench.routing import (
     WEIGHTS,
@@ -223,6 +223,59 @@ class RoutedDeliveryTests(unittest.TestCase):
         self.fixture = fixtures.WorkbenchTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+
+    def qa_failure_bench(self, failures, **options):
+        class InvalidQA(RoutedFake):
+            qa_attempts = 0
+
+            def ask(self, provider, prompt, schema, *, model=None):
+                if schema is QAResult:
+                    self.qa_attempts += 1
+                    if self.qa_attempts <= failures:
+                        self.calls.append((provider, schema.__name__, json.loads(prompt)))
+                        return QAResult.model_validate_json('{"verdict":"not-a-verdict"}')
+                return super().ask(provider, prompt, schema, model=model)
+
+        fake = InvalidQA(**options)
+        return self.fixture.bench(fake, routing=True, mode="hackathon"), fake
+
+    def test_invalid_haiku_qa_escalates_once_without_implementation_repair(self):
+        bench, fake = self.qa_failure_bench(1)
+        result = bench.run()
+        self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual(result["repairs"], 0)
+        qa = [r for r in bench.invocations if r["task_or_phase"] == "6/7 RED TEAM"]
+        self.assertEqual(len(qa), 2)
+        self.assertEqual(qa[0]["selected_model"], "haiku")
+        self.assertFalse(qa[0]["schema_success"])
+        self.assertEqual(qa[1]["selected_tier"], qa[0]["selected_tier"] + 1)
+        self.assertTrue(qa[1]["schema_success"])
+        self.assertEqual([c[1] for c in fake.calls].count("BuildTask"), 1)
+        self.assertEqual([c[1] for c in fake.calls].count("ExpertReport"), 3)
+        self.assertEqual([c[1] for c in fake.calls].count("Challenge"), 3)
+
+    def test_second_invalid_qa_blocks_without_repair_or_third_model_call(self):
+        bench, fake = self.qa_failure_bench(2)
+        result = bench.run()
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 0))
+        self.assertEqual((self.fixture.repo / "app.py").read_text(), "VALUE = 0\n")
+
+    def test_successful_haiku_qa_does_not_escalate(self):
+        bench, fake = self.qa_failure_bench(0)
+        result = bench.run()
+        self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (1, 0))
+        self.assertEqual(bench.invocations[-1]["selected_model"], "haiku")
+        self.assertIsNone(bench.invocations[-1]["escalation_from"])
+
+    def test_model_escalation_and_real_defect_use_separate_budgets(self):
+        bench, fake = self.qa_failure_bench(1, bad_build=True, qa_fix=True)
+        result = bench.run()
+        self.assertEqual(result["status"], "DELIVERED")
+        self.assertEqual((fake.qa_attempts, result["repairs"]), (2, 1))
+        self.assertEqual([c[1] for c in fake.calls].count("RepairResult"), 1)
+        self.assertEqual(WEIGHTS["hackathon"]["cost"], 0)
 
     def test_original_path_remains_available(self):
         fake = FakeProvider()

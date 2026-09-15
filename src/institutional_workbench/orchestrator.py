@@ -203,7 +203,10 @@ class Workbench:
             if self.runner.deadline - time.monotonic() < 180
             else self.profile
         )
-        for attempt in range(2):  # At most one local escalation; never recurse or restart a round.
+        model_failure = False
+        for attempt in range(
+            2
+        ):  # At most one local escalation; separate from implementation repair.
             self.runner.check()
             if self.state["calls"] >= self.state["max_calls"]:
                 raise Blocked("Model-call cap reached; no further routing")
@@ -215,6 +218,7 @@ class Workbench:
                 pinned_provider=pinned,
                 previous=previous,
                 trigger=trigger,
+                model_failure=model_failure,
             )
             self.state["calls"] += 1
             call_id = self.state["calls"]
@@ -271,12 +275,13 @@ class Workbench:
                     result.model_dump_json(indent=2)
                 )
                 return result
-            except Blocked as exc:
+            except (Blocked, OSError, ValueError) as exc:
                 record["failure"] = str(exc)
                 self.runner.check()  # Cancellation/deadline never becomes a model escalation.
                 if attempt or not route.escalation_allowed:
                     raise
                 previous, trigger = route, str(exc)
+                model_failure = not record["schema_success"]
             finally:
                 record.update(ended=time.time(), wall_seconds=round(time.time() - started, 3))
                 usage = getattr(self.provider, "last_usage", {})

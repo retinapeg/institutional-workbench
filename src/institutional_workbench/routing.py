@@ -334,6 +334,7 @@ class Router:
         pinned_provider: str | None = None,
         previous: RoutingDecision | None = None,
         trigger: str | None = None,
+        model_failure: bool = False,
     ) -> RoutingDecision:
         required = (
             4
@@ -353,12 +354,16 @@ class Router:
             if m.enabled and (not pinned_provider or m.provider == pinned_provider)
         ]
         if previous:
-            if self.mode == "hackathon" and (
-                not trigger
-                or not re.search(
-                    r"executable|test.*fail|critical decision|difficulty", trigger.lower()
+            if (
+                self.mode == "hackathon"
+                and not model_failure
+                and (
+                    not trigger
+                    or not re.search(
+                        r"executable|test.*fail|critical decision|difficulty", trigger.lower()
+                    )
+                    or previous.escalation_from is not None
                 )
-                or previous.escalation_from is not None
             ):
                 raise Blocked("Hackathon escalation requires evidence and permits only one step")
             if not previous.escalation_allowed or previous.selected_tier is None:
