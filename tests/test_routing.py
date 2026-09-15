@@ -296,6 +296,7 @@ class RoutedDeliveryTests(unittest.TestCase):
         self.assertEqual(result["status"], "BLOCKED")
         self.assertLessEqual(result["calls"], 16)
         self.assertLessEqual(result["repairs"], 2)
+        self.assertLessEqual(result["repairs"], 1)
         self.assertEqual(sum(r["task_or_phase"] == "6/7 RED TEAM" for r in bench.invocations), 1)
 
     def test_deadline_never_becomes_an_escalation(self):

@@ -575,7 +575,8 @@ class Workbench:
                         record["repair_required"] = True
                         break
                 self.write_telemetry()
-            for _ in range(2):
+            repair_limit = 1 if self.mode == "hackathon" else 2
+            for _ in range(repair_limit):
                 if not needs_fix:
                     break
                 self.state["repairs"] += 1
@@ -599,7 +600,7 @@ class Workbench:
                 )
             if needs_fix:
                 raise Blocked(
-                    "Acceptance still fails after two repair cycles. See output/tests.json"
+                    f"Acceptance still fails after {repair_limit} repair cycles. See output/tests.json"
                 )
             self.runner.check()
             if self.dirty() or self.git("rev-parse", "HEAD") != base:

@@ -12,6 +12,31 @@ from institutional_workbench.cli import main
 
 
 class CliErgonomicsTests(unittest.TestCase):
+    def test_task_file_preserves_full_task_and_current_repository(self):
+        task = (
+            'Rank three values. Preserve "quotes", $HOME, `commands`, and Unicode π.\nSecond line.'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            task_file = repo / "task.txt"
+            task_file.write_text(task, encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            with (
+                patch("pathlib.Path.cwd", return_value=repo),
+                patch.object(sys, "argv", ["inst", "hackathon", "--task-file", str(task_file)]),
+                patch("institutional_workbench.cli.Workbench") as workbench,
+                patch("institutional_workbench.cli.signal.signal"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                workbench.return_value.run.return_value = {
+                    "status": "BLOCKED",
+                    "current_blocker": "mock",
+                }
+                self.assertEqual(main(), 1)
+                self.assertEqual(workbench.call_args.kwargs["objective"], task)
+                self.assertTrue(workbench.call_args.kwargs["routing"])
+                self.assertEqual(workbench.call_args.args[0], repo)
+
     def test_entry_points_share_unchanged_cli(self):
         project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
         self.assertEqual(

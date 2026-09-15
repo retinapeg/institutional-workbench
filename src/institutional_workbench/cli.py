@@ -19,6 +19,7 @@ def main() -> int:
         choices=["engineering", "hackathon", "economy", "dev", "hack", "status", "cancel"],
     )
     parser.add_argument("task", nargs="?")
+    parser.add_argument("--task-file", type=Path, help="Read the exact task from a UTF-8 file")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--builder", choices=["claude", "codex"])
     parser.add_argument("--reviewer", choices=["claude", "codex"])
@@ -40,6 +41,10 @@ def main() -> int:
     )
     parser.add_argument("--minutes", type=float, default=15)
     args = parser.parse_args()
+    if args.task_file:
+        if args.task is not None:
+            parser.error("Use a task argument or --task-file, not both")
+        args.task = args.task_file.read_text(encoding="utf-8")
     if not 0 < args.minutes <= 60:
         parser.error("--minutes must be between 0 and 60")
     try:

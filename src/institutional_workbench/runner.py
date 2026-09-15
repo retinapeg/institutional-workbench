@@ -34,6 +34,9 @@ class Runner:
     ) -> tuple[int, str, str]:
         self.check()
         deadline = min(self.deadline, time.monotonic() + timeout)
+        env = os.environ.copy()
+        if Path(argv[0]).name == "claude":
+            env.pop("CLAUDECODE", None)  # Allow the isolated, tools-disabled provider child.
         process = subprocess.Popen(
             argv,
             cwd=cwd,
@@ -41,6 +44,7 @@ class Runner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            env=env,
         )
         assert process.stdin and process.stdout and process.stderr
         output = {"out": bytearray(), "err": bytearray()}
