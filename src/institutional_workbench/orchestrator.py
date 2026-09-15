@@ -24,9 +24,15 @@ from .routing import (
     profile_task,
     select_specialists,
 )
-from .runner import Blocked, Runner
+from .runner import Blocked, Deadline, Runner
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class DeliberationClosed(Blocked):
+    pass
+
+
 POLICIES = {
     **MODE_TEXT,
     "dev": MODE_TEXT["engineering"],
@@ -59,7 +65,7 @@ class Workbench:
         self.repo, self.run_dir, self.runner, self.provider = repo, run_dir, runner, provider
         self.lock = threading.RLock()
         self.clock_start = time.monotonic()
-        self.budget_seconds = max(0.0, runner.deadline - self.clock_start)
+        self.budget_seconds = max(0.0, runner.advisory_deadline - self.clock_start)
         self.build_deadline = self.clock_start + self.budget_seconds * 0.20
         self.demo_command: list[str] = []
         self.mode, self.objective = cast(Mode, ALIASES.get(mode, mode)), objective
@@ -93,6 +99,7 @@ class Workbench:
             "run_dir": str(run_dir),
             "repository": str(repo),
             "budget_seconds": self.budget_seconds,
+            "hard_deadline": runner.deadline != float("inf"),
             "time_to_build_start": None,
             "time_to_first_passing_test": None,
             "time_to_working_demo": None,
@@ -138,6 +145,30 @@ class Workbench:
             temporary = target.with_suffix(".tmp")
             temporary.write_text(json.dumps(self.state, indent=2) + "\n")
             os.replace(temporary, target)
+
+    def crunch(self) -> bool:
+        return self.mode == "hackathon" and (self.run_dir / "crunch").exists()
+
+    def pause_checkpoint(
+        self, remaining: str = "Awaiting your direction; no further autonomous work"
+    ) -> None:
+        self.state.update(
+            status="PAUSED",
+            checkpoint={
+                "WORKING NOW": f"Candidate retained in {self.work}",
+                "WHAT REMAINS": remaining,
+                "TEST STATUS": self.test_results,
+                "DEMO STATUS": self.state.get("demo", "Not separately verified"),
+                "CURRENT RISKS": self.state.get("limitations", [])
+                + (
+                    [str(self.state["current_blocker"])]
+                    if self.state.get("current_blocker")
+                    else []
+                ),
+                "BEST NEXT ACTION": "Inspect the checkpoint, then choose continue, redirect, specific repair, or delivery. Nothing was auto-applied.",
+            },
+        )
+        self.event("PAUSED", "Crunch checkpoint ready; waiting for user direction")
 
     def event(self, phase: str, action: str, **details: Any) -> None:
         with self.lock:
@@ -198,10 +229,8 @@ class Workbench:
     ) -> T:
         runner, client = self.runner, self.provider
         if deadline is not None:
-            runner = Runner(self.runner.cancel_file)
-            runner.deadline = min(self.runner.deadline, deadline)
             if isinstance(client, CliProviders):
-                client = CliProviders(runner, client.models["claude"], client.models["codex"])
+                client = CliProviders(self.runner, client.models["claude"], client.models["codex"])
         role = str(
             context.get(
                 "role",
@@ -227,7 +256,7 @@ class Workbench:
             raise Blocked("Builder route cannot escalate; refusing to repeat a failed model")
         local_profile = (
             self.profile.model_copy(update={"latency_sensitivity": "critical"})
-            if self.runner.deadline - time.monotonic() < 180
+            if self.runner.advisory_deadline - time.monotonic() < 180 or self.crunch()
             else self.profile
         )
         model_failure = False
@@ -235,6 +264,8 @@ class Workbench:
             2
         ):  # At most one local escalation; separate from implementation repair.
             runner.check()
+            if deadline is not None and (time.monotonic() >= deadline or self.crunch()):
+                raise DeliberationClosed("Optional deliberation closed; freeze available evidence")
             with self.lock:
                 if self.state["calls"] >= self.state["max_calls"]:
                     raise Blocked("Model-call cap reached; no further routing")
@@ -342,9 +373,9 @@ class Workbench:
                 return self.ask_routed(
                     phase, expert[1], context, schema, deadline=deadline
                 ).model_dump()
-            except Blocked:
+            except DeliberationClosed:
                 self.runner.check()
-                if time.monotonic() < deadline:
+                if time.monotonic() < deadline and not self.crunch():
                     raise
                 self.event(
                     "DELIBERATION CUTOFF", f"{expert[0]} unfinished; build with available evidence"
@@ -524,7 +555,7 @@ class Workbench:
                     self.mode,
                     context_chars=sum(map(len, before.values())),
                     has_tests=bool(self.commands),
-                    remaining_seconds=self.runner.deadline - time.monotonic(),
+                    remaining_seconds=self.runner.advisory_deadline - time.monotonic(),
                 )
                 self.state["task_profile"] = self.profile.model_dump()
                 if not self.explicit_experts:
@@ -598,6 +629,7 @@ class Workbench:
                     self.consult("2/7 CHALLENGE", contexts, Challenge, challenge_deadline)
                     if self.profile.difficulty not in {"trivial", "low"}
                     and time.monotonic() < challenge_deadline
+                    and not self.crunch()
                     and reports
                     else []
                 )
@@ -623,9 +655,9 @@ class Workbench:
                         Decision,
                         deadline=self.build_deadline,
                     )
-                except Blocked:
+                except DeliberationClosed:
                     self.runner.check()
-                    if time.monotonic() < self.build_deadline:
+                    if time.monotonic() < self.build_deadline and not self.crunch():
                         raise
                     decision = self.deadline_decision(reports, challenges)
                     self.event(
@@ -662,6 +694,10 @@ class Workbench:
             self.state["time_to_build_start"] = round(time.monotonic() - self.clock_start, 3)
             build = self.ask("4/7 BUILD", self.builder, context, BuildTask)
             if build.question:
+                if self.crunch():
+                    raise Blocked(
+                        "Builder needs user direction at crunch checkpoint: " + build.question
+                    )
                 answer = self.ask(
                     "4/7 FOCUSED HELP",
                     self.reviewer,
@@ -770,6 +806,18 @@ class Workbench:
                 raise Blocked("No deliverable diff exists")
             patch_path = self.run_dir / "output/delivery.patch"
             patch_path.write_text(patch)
+            if self.crunch():
+                self.state.update(
+                    tests=self.test_results,
+                    run_command=build.run_command,
+                    limitations=build.limitations + qa.limitations,
+                    files_changed=sorted(self.changed),
+                    delivery_patch=str(patch_path),
+                )
+                self.pause_checkpoint()
+                self.state["elapsed_seconds"] = round(time.time() - self.state["started"], 1)
+                self.save()
+                return self.state
             self.runner.run(["git", "apply", "--check", str(patch_path)], self.repo)
             self.runner.run(["git", "apply", str(patch_path)], self.repo)
             changed = self.git("diff", "--name-only", "HEAD", cwd=self.work).splitlines()
@@ -789,8 +837,21 @@ class Workbench:
                 )
             self.event("7/7 DELIVERED", build.summary)
         except (Blocked, OSError, ValueError) as exc:
-            self.state.update(status="BLOCKED", current_blocker=str(exc))
-            self.event("BLOCKED", "Resolve the concrete blocker, then start a fresh bounded run")
+            self.state.update(
+                status="DEADLINE" if isinstance(exc, Deadline) else "BLOCKED",
+                current_blocker=str(exc),
+            )
+            if (
+                self.crunch()
+                and not isinstance(exc, Deadline)
+                and not self.runner.cancel_file.exists()
+            ):
+                self.pause_checkpoint("Checkpoint is incomplete; resolve the recorded blocker")
+            else:
+                self.event(
+                    self.state["status"],
+                    "Resolve the concrete blocker, then start a fresh bounded run",
+                )
         self.state["elapsed_seconds"] = round(time.time() - self.state["started"], 1)
         self.save()
         return self.state

@@ -37,6 +37,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--task-file", required=True)
+    parser.add_argument("--hard-deadline", type=float)
     args = parser.parse_args()
     sys.exit(
         run_child(
@@ -51,5 +52,10 @@ if __name__ == "__main__":
                 args.task_file,
                 "--explain-routing",
             ]
+            + (
+                ["--hard-deadline", str(args.hard_deadline)]
+                if args.hard_deadline is not None
+                else []
+            )
         )
     )

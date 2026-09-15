@@ -355,7 +355,7 @@ class RoutedDeliveryTests(unittest.TestCase):
     def test_deadline_never_becomes_an_escalation(self):
         bench = self.fixture.bench(RoutedFake(), routing=True)
         bench.runner.deadline = 0
-        self.assertEqual(bench.run()["status"], "BLOCKED")
+        self.assertEqual(bench.run()["status"], "DEADLINE")
         self.assertEqual(bench.state["calls"], 0)
 
 

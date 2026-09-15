@@ -12,16 +12,21 @@ class Blocked(RuntimeError):
     pass
 
 
+class Deadline(Blocked):
+    pass
+
+
 class Runner:
-    def __init__(self, cancel_file: Path, seconds: float = 900):
+    def __init__(self, cancel_file: Path, seconds: float = 900, *, hard_deadline: bool = True):
         self.cancel_file = cancel_file
-        self.deadline = time.monotonic() + seconds
+        self.advisory_deadline = time.monotonic() + seconds
+        self.deadline = self.advisory_deadline if hard_deadline else float("inf")
 
     def check(self) -> None:
         if self.cancel_file.exists():
             raise Blocked("Cancelled by user; isolated work is preserved.")
         if time.monotonic() >= self.deadline:
-            raise Blocked("Run time budget exhausted; isolated work is preserved.")
+            raise Deadline("Hard deadline exhausted; isolated work is preserved.")
 
     def run(
         self,

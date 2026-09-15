@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,45 @@ from institutional_workbench.cli import main
 
 
 class CliErgonomicsTests(unittest.TestCase):
+    def test_hackathon_default_is_soft_and_explicit_deadline_is_hard(self):
+        for flags, hard in (([], False), (["--hard-deadline", "25"], True)):
+            with tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory).resolve()
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
+                with (
+                    patch("pathlib.Path.cwd", return_value=repo),
+                    patch.object(sys, "argv", ["inst", "hackathon", "Task in 25 minutes", *flags]),
+                    patch("institutional_workbench.cli.Workbench") as workbench,
+                    patch("institutional_workbench.cli.signal.signal"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    workbench.return_value.run.return_value = {
+                        "status": "BLOCKED",
+                        "current_blocker": "mock",
+                    }
+                    main()
+                    runner = workbench.call_args.args[2]
+                    self.assertEqual(runner.deadline != float("inf"), hard)
+
+    def test_crunch_control_does_not_cancel_or_launch_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            run = repo / ".institutional-workbench/run"
+            run.mkdir(parents=True)
+            (run.parent / "active.json").write_text(json.dumps({"run_dir": str(run)}))
+            (run / "run.json").write_text(json.dumps({"status": "RUNNING", "mode": "hackathon"}))
+            with (
+                patch("pathlib.Path.cwd", return_value=repo),
+                patch.object(sys, "argv", ["inst", "crunch"]),
+                patch("institutional_workbench.cli.Workbench") as workbench,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(main(), 0)
+                workbench.assert_not_called()
+            self.assertTrue((run / "crunch").exists())
+            self.assertFalse((run / "cancel").exists())
+
     def test_task_file_preserves_full_task_and_current_repository(self):
         task = (
             'Rank three values. Preserve "quotes", $HOME, `commands`, and Unicode π.\nSecond line.'

@@ -24,7 +24,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Decide, build, test, deliver, stop.")
     parser.add_argument(
         "command",
-        choices=["engineering", "hackathon", "economy", "dev", "hack", "status", "cancel"],
+        choices=[
+            "engineering",
+            "hackathon",
+            "economy",
+            "dev",
+            "hack",
+            "status",
+            "cancel",
+            "crunch",
+        ],
     )
     parser.add_argument("task", nargs="?")
     parser.add_argument("--task-file", type=Path, help="Read the exact task from a UTF-8 file")
@@ -50,6 +59,12 @@ def main() -> int:
     parser.add_argument(
         "--minutes", type=float, help="Time budget; overrides an explicit deadline in task text"
     )
+    parser.add_argument(
+        "--hard-deadline",
+        type=float,
+        metavar="MINUTES",
+        help="Explicit hard run deadline; Hackathon otherwise uses a soft budget",
+    )
     args = parser.parse_args()
     if args.task_file:
         if args.task is not None:
@@ -61,6 +76,8 @@ def main() -> int:
         )
     if not 0 < args.minutes <= 60:
         parser.error("--minutes must be between 0 and 60")
+    if args.hard_deadline is not None and not 0 < args.hard_deadline <= 60:
+        parser.error("--hard-deadline must be between 0 and 60")
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -74,7 +91,7 @@ def main() -> int:
         root = repo / ".institutional-workbench"
         root.mkdir(exist_ok=True)
         active = root / "active.json"
-        if args.command in {"status", "cancel"}:
+        if args.command in {"status", "cancel", "crunch"}:
             if not active.exists():
                 raise Blocked("No previous run in this repository")
             state_path = Path(json.loads(active.read_text())["run_dir"]) / "run.json"
@@ -83,9 +100,16 @@ def main() -> int:
                 if state_path.exists()
                 else {"status": "STARTING"}
             )
-            if args.command == "cancel":
-                if state["status"] in {"DELIVERED", "BLOCKED"}:
+            if args.command in {"cancel", "crunch"}:
+                if state["status"] in {"DELIVERED", "BLOCKED", "PAUSED", "DEADLINE", "CANCELLED"}:
                     print("Run has already stopped.")
+                elif args.command == "crunch":
+                    if state.get("mode") not in {"hack", "hackathon"}:
+                        raise Blocked("Crunch control applies only to Hackathon")
+                    (state_path.parent / "crunch").touch()
+                    print(
+                        "CRUNCH requested: finish the atomic operation, verify a checkpoint, then pause."
+                    )
                 else:
                     (state_path.parent / "cancel").touch()
                     print(
@@ -106,7 +130,12 @@ def main() -> int:
             run_dir = root / time.strftime("%Y%m%d-%H%M%S")
             run_dir.mkdir(exist_ok=False)
             active.write_text(json.dumps({"run_dir": str(run_dir)}))
-            runner = Runner(run_dir / "cancel", args.minutes * 60)
+            runner = Runner(
+                run_dir / "cancel",
+                (args.hard_deadline or args.minutes) * 60,
+                hard_deadline=args.hard_deadline is not None
+                or args.command not in {"hack", "hackathon"},
+            )
             signal.signal(signal.SIGINT, lambda *_: runner.cancel_file.touch())
             signal.signal(signal.SIGTERM, lambda *_: runner.cancel_file.touch())
             providers = CliProviders(
@@ -140,7 +169,10 @@ def main() -> int:
                 explain_routing=args.explain_routing,
             ).run()
             print("\n" + state["status"])
-            if state["status"] == "DELIVERED":
+            if state["status"] == "PAUSED":
+                for heading, value in state["checkpoint"].items():
+                    print(heading + ": " + str(value))
+            elif state["status"] == "DELIVERED":
                 print("What changed: " + state["deliverable"])
                 print(
                     "Tests: "
@@ -156,7 +188,7 @@ def main() -> int:
                 print("Concrete blocker: " + state["current_blocker"])
                 print("Best next action: resolve that blocker, then run the command again.")
             print("Evidence: " + str(run_dir))
-            return 0 if state["status"] == "DELIVERED" else 1
+            return 0 if state["status"] in {"DELIVERED", "PAUSED"} else 1
     except (Blocked, OSError, subprocess.SubprocessError) as exc:
         print(f"BLOCKED\n{exc}")
         return 1
