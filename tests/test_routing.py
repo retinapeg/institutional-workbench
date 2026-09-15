@@ -17,6 +17,72 @@ from institutional_workbench.runner import Blocked
 
 
 class RoutingPolicyTests(unittest.TestCase):
+    def test_hackathon_capability_floor_changes_selection(self):
+        router = Router("hackathon")
+        easy = profile_task("Rename a field", "hackathon", has_tests=True)
+        normal = profile_task("Build a working search demo", "hackathon", has_tests=True)
+        hard = profile_task("Research a novel numerical proof", "hackathon", has_tests=True)
+        calls = [
+            (easy, "CHECK", "Software Engineer", 1, "haiku"),
+            (normal, "4/7 BUILD", "Builder", 3, "gpt-5.6-sol"),
+            (normal, "2/7 INDEPENDENT", "Software Engineer", 3, "gpt-5.6-sol"),
+            (hard, "2/7 INDEPENDENT", "Mathematician", 4, "gpt-6-astra"),
+            (hard, "2/7 INDEPENDENT", "Product Engineer", 3, "gpt-5.6-sol"),
+            (hard, "6/7 RED TEAM", "Security / Reliability", 3, "gpt-5.6-sol"),
+            (normal, "6/7 RED TEAM", "Security / Reliability", 1, "haiku"),
+        ]
+        for profile, phase, role, tier, model in calls:
+            with self.subTest(phase=phase, role=role, difficulty=profile.difficulty):
+                route = router.choose(profile, phase, role)
+                self.assertEqual((route.selected_tier, route.selected_model), (tier, model))
+                self.assertIn("monetary cost weight exactly zero", route.rationale)
+
+    def test_hackathon_cost_and_diversity_never_change_winner(self):
+        for task, role in (
+            ("Rename a field", "Software Engineer"),
+            ("Build a demo", "Builder"),
+            ("Research a novel numerical proof", "Mathematician"),
+        ):
+            profile = profile_task(task, "hackathon", has_tests=True)
+            registry = model_registry()
+            expected = Router("hackathon", registry).choose(profile, "ANALYSE", role)
+            for cost in ("very_low", "low", "medium", "high", "premium"):
+                for model in registry:
+                    model.cost_class = (
+                        cost if model.model == expected.selected_model else "very_low"
+                    )
+                for preference in (None, "claude", "codex"):
+                    actual = Router("hackathon", registry).choose(
+                        profile, "ANALYSE", role, preferred=preference
+                    )
+                    self.assertEqual(actual.selected_model, expected.selected_model)
+
+    def test_hackathon_one_evidenced_escalation(self):
+        router = Router("hackathon")
+        profile = profile_task("Rename field", "hackathon", has_tests=True)
+        first = router.choose(profile, "BUILD", "Builder")
+        with self.assertRaises(Blocked):
+            router.choose(profile, "FIX", "Builder", previous=first)
+        with self.assertRaises(Blocked):
+            router.choose(profile, "FIX", "Builder", previous=first, trigger="prefer diversity")
+        second = router.choose(
+            profile, "FIX", "Builder", previous=first, trigger="executable test failed"
+        )
+        self.assertEqual(second.selected_tier, 2)
+        with self.assertRaises(Blocked):
+            router.choose(profile, "FIX", "Builder", previous=second, trigger="test failed")
+
+    def test_hackathon_uses_speed_and_reliability_not_model_name(self):
+        registry = model_registry()
+        for model in registry:
+            if model.model == "opus":
+                model.speed_class = 3
+        profile = profile_task("Build a demo", "hackathon", has_tests=True)
+        self.assertEqual(
+            Router("hackathon", registry).choose(profile, "BUILD", "Builder").selected_model,
+            "opus",
+        )
+
     def test_domain_selection_cases(self):
         cases = [
             (

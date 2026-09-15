@@ -289,6 +289,30 @@ class RoutingDecision(Record):
     escalation_trigger: str | None = None
 
 
+def hackathon_required_tier(profile: TaskProfile, phase: str, role: str) -> int:
+    """Per-call sufficiency policy; ordinal priors, not benchmark measurements."""
+    phase, role = phase.upper(), role.lower()
+    check = any(label in phase for label in ("INSPECT", "CHECK", "QA", "RED TEAM"))
+    if (
+        profile.verification_strength == "strong"
+        and profile.consequence_of_failure != "high"
+        and (check or profile.difficulty in {"trivial", "low"})
+    ):
+        return 1
+    domain_reasoning = (
+        ("mathematics" in profile.domain_tags and "mathematic" in role)
+        or ("physics" in profile.domain_tags and "physic" in role)
+        or ("systems" in profile.domain_tags and ("system" in role or "architect" in role))
+    )
+    critical_decision = "DECIDE" in phase and profile.consequence_of_failure == "high"
+    if (domain_reasoning or critical_decision) and (
+        profile.difficulty == "frontier"
+        or (profile.difficulty == "high" and profile.ambiguity == "high")
+    ):
+        return 4
+    return 3  # Normal specialist reasoning and meaningful builds require strong capability.
+
+
 class Router:
     def __init__(
         self,
@@ -321,12 +345,22 @@ class Router:
             and profile.verification_strength == "strong"
             else 2
         )
+        if self.mode == "hackathon":
+            required = hackathon_required_tier(profile, phase, role)
         candidates = [
             m
             for m in self.registry
             if m.enabled and (not pinned_provider or m.provider == pinned_provider)
         ]
         if previous:
+            if self.mode == "hackathon" and (
+                not trigger
+                or not re.search(
+                    r"executable|test.*fail|critical decision|difficulty", trigger.lower()
+                )
+                or previous.escalation_from is not None
+            ):
+                raise Blocked("Hackathon escalation requires evidence and permits only one step")
             if not previous.escalation_allowed or previous.selected_tier is None:
                 raise Blocked("This route cannot escalate")
             levels = [m.tier for m in candidates if m.tier > previous.selected_tier]
@@ -359,11 +393,33 @@ class Router:
             )
 
         # Do not buy intelligence above sufficiency for trivial/low-risk labour.
-        if not previous and profile.difficulty in {"trivial", "low"}:
+        if self.mode != "hackathon" and not previous and profile.difficulty in {"trivial", "low"}:
             candidates = [m for m in candidates if m.tier == min(x.tier for x in candidates)]
         elif not previous and self.mode == "engineering" and profile.ambiguity != "high":
             candidates = [m for m in candidates if m.tier == min(x.tier for x in candidates)]
-        selected = max(candidates, key=score)
+        if self.mode == "hackathon":
+            # Capability first, then fastest reliable sufficient model. No cost/diversity term.
+            candidates = [
+                m
+                for m in candidates
+                if min(m.quality_class, m.reasoning_strength, m.coding_strength) >= required
+                and (
+                    not ("mathematic" in role.lower() or "physic" in role.lower())
+                    or m.maths_strength >= required
+                )
+                and (
+                    not ("statistic" in role.lower() or "data scientist" in role.lower())
+                    or m.statistical_strength >= required
+                )
+            ]
+            if not candidates:
+                raise Blocked(f"No enabled model meets role capability floor {required}")
+            selected = max(
+                candidates,
+                key=lambda m: (m.speed_class, m.reliability_prior, m.quality_class),
+            )
+        else:
+            selected = max(candidates, key=score)
         manual_model = self.overrides.get(selected.provider)
         if manual_model and previous:
             raise Blocked("Explicit model selection disables automatic escalation")
@@ -377,15 +433,28 @@ class Router:
             relative_cost_class="unknown" if manual_model else selected.cost_class,
             mode=self.mode,
             rationale=(f"Manual model override {manual_model}. " if manual_model else "")
-            + f"Required tier {required}; weights {weight}; highest configured score {score(selected):.2f}. "
+            + (
+                f"Required tier {required} for {role}/{phase}; eligible models ranked by speed, "
+                "reliability, then quality; monetary cost weight exactly zero; no diversity bonus. "
+                if self.mode == "hackathon"
+                else f"Required tier {required}; weights {weight}; highest configured score {score(selected):.2f}. "
+            )
             + (
                 f"Provider pinned to {pinned_provider}. "
                 if pinned_provider
+                else ""
+                if self.mode == "hackathon"
                 else f"Soft diversity preference {preferred}; never required. "
             )
             + "Capabilities, speed and cost are ordinal priors, not measured success probabilities or prices.",
             alternatives_considered=[
-                f"{m.provider}/{m.model}: {score(m):.2f}" for m in candidates if m != selected
+                (
+                    f"{m.provider}/{m.model}: speed={m.speed_class}, reliability={m.reliability_prior}"
+                    if self.mode == "hackathon"
+                    else f"{m.provider}/{m.model}: {score(m):.2f}"
+                )
+                for m in candidates
+                if m != selected
             ],
             escalation_allowed=not manual_model
             and any(
