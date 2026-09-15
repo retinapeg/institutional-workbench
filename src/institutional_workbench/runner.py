@@ -101,6 +101,10 @@ class Runner:
                         os.killpg(process.pid, 0)
                     except ProcessLookupError:
                         break
+                    except PermissionError:
+                        # macOS may deny a group probe while the leader is exiting.
+                        if process.poll() is not None:
+                            break
                     time.sleep(0.02)
                 try:
                     os.killpg(process.pid, signal.SIGKILL)

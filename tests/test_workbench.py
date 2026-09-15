@@ -1,4 +1,6 @@
+import errno
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -6,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from institutional_workbench.models import (
     BuildTask,
@@ -346,6 +349,27 @@ class WorkbenchTests(unittest.TestCase):
             )
         time.sleep(0.55)
         self.assertFalse(marker.exists())
+
+    def test_eperm_group_probe_does_not_mask_model_timeout(self):
+        real_killpg = os.killpg
+        probes = []
+
+        def denied_probe(pid, sig):
+            if sig == 0:
+                probes.append((pid, sig))
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+            return real_killpg(pid, sig)
+
+        with patch("institutional_workbench.runner.os.killpg", side_effect=denied_probe):
+            with self.assertRaisesRegex(Blocked, "Command timed out after 0.05s"):
+                Runner(Path(self.tmp.name) / "cancel").run(
+                    [sys.executable, "-c", "import time; time.sleep(10)"],
+                    self.repo,
+                    timeout=0.05,
+                )
+        self.assertTrue(probes)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(probes[0][0], os.WNOHANG)  # The child was reaped, not abandoned.
 
     def test_cancel_kills_child(self):
         cancel = Path(self.tmp.name) / "cancel"
