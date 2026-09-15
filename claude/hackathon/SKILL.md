@@ -3,10 +3,13 @@ name: hackathon
 description: Run the Python Institutional Workbench hackathon engine in the current repository and return its final result.
 argument-hint: "<task>"
 disable-model-invocation: true
+allowed-tools: Bash(/Users/leonardaarons-ditson/Documents/Codex/institutional-workbench-routing/.venv/bin/python /Users/leonardaarons-ditson/Documents/Codex/institutional-workbench-routing/claude/hackathon/bridge.py --repo *)
 ---
 
 You are only the cockpit. Do not inspect/plan/build the task yourself, spawn agents, or follow the
 native roundtable procedure. The Python engine owns roles, routing, building, tests and QA.
+The skill-scoped permission above pre-approves only this installed bridge launch. It does not
+allow arbitrary Python/Bash commands or change Auto Mode's rules for other actions.
 
 The user's exact task is:
 <workbench-task>

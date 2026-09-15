@@ -1,3 +1,4 @@
+import fnmatch
 import subprocess
 import sys
 import time
@@ -8,6 +9,27 @@ BRIDGE = Path(__file__).parents[1] / "claude/hackathon/bridge.py"
 
 
 class BridgeTests(unittest.TestCase):
+    def test_skill_permission_is_scoped_to_exact_bridge_launch(self):
+        skill = BRIDGE.with_name("SKILL.md").read_text()
+        frontmatter = skill.split("---", 2)[1]
+        rules = [line for line in frontmatter.splitlines() if line.startswith("allowed-tools:")]
+        trusted = "/Users/leonardaarons-ditson/Documents/Codex/institutional-workbench-routing"
+        prefix = f"{trusted}/.venv/bin/python {trusted}/claude/hackathon/bridge.py --repo "
+        self.assertEqual(rules, [f"allowed-tools: Bash({prefix}*)"])
+        self.assertIn("disable-model-invocation: true", frontmatter)
+        # Configuration contract only; Claude itself enforces shell parsing/permissions.
+        self.assertTrue(
+            fnmatch.fnmatchcase(prefix + '"/tmp/demo" --task-file "/tmp/task"', prefix + "*")
+        )
+        for other in (
+            "bash -c 'echo unrelated'",
+            f"{trusted}/.venv/bin/python -c 'print(1)'",
+            f"{trusted}/.venv/bin/python /tmp/other.py --repo /tmp/demo",
+            f"{trusted}/.venv/bin/python {trusted}/claude/hackathon/bridge.py.other --repo /tmp/demo",
+            f"{trusted}/.venv/bin/python -m institutional_workbench.cli hackathon task",
+        ):
+            self.assertFalse(fnmatch.fnmatchcase(other, prefix + "*"), other)
+
     def launch(self, child):
         launcher = (
             f"import runpy,sys; run=runpy.run_path({str(BRIDGE)!r})['run_child']; "
