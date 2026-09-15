@@ -11,6 +11,7 @@ dependencies = ["pydantic>=2.10,<3"]
 
 [project.scripts]
 inst = "institutional_workbench.cli:main"
+inst2 = "institutional_workbench.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/institutional_workbench"]
