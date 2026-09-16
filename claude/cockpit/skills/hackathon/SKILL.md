@@ -3,6 +3,7 @@ name: hackathon
 description: Claude builds, tests and delivers against a deadline, with optional routed expert advice.
 argument-hint: "<goal> [deadline] | status"
 disable-model-invocation: true
+allowed-tools: Bash(/Users/leonardaarons-ditson/Code/institutional-workbench-routing/.venv/bin/python -m institutional_workbench.cockpit *)
 ---
 
 User request: $ARGUMENTS
@@ -24,6 +25,9 @@ It does not grant repository permission or manage Claude's implementation.
    Convert the user's deadline to remaining minutes; default to 120 minutes if omitted. Write the
    exact goal to a temporary file and run:
    `CTRL start --repo "<repository root>" --task-file "<task file>" --minutes <minutes>`
+   Use Write for the task/plan files. Invoke each controller action as one standalone Bash command
+   beginning with the literal absolute controller prefix above—no shell variable, heredoc, command
+   substitution or compound command. The skill-scoped permission applies only to that exact prefix.
    Save the returned `run` path. Never replace it to escape an error.
 
 2. Inspect repository instructions, source and real run/test commands. Define the smallest useful
