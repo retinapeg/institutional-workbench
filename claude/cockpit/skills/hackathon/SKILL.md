@@ -23,15 +23,19 @@ It does not grant repository permission or manage Claude's implementation.
 1. Empty `/hackathon`: ask for a goal and deadline. For `/hackathon status`, show the current
    run using `CTRL status --human`. Otherwise start in the current clean, committed Git repository.
    Convert the user's deadline to remaining minutes; default to 120 minutes if omitted. Write the
-   exact goal to a temporary file and run:
+   exact goal to a unique file under `/tmp` (never inside the target repository) and run:
    `CTRL start --repo "<repository root>" --task-file "<task file>" --minutes <minutes>`
    Use Write for the task/plan files. Invoke each controller action as one standalone Bash command
    beginning with the literal absolute controller prefix above—no shell variable, heredoc, command
    substitution or compound command. The skill-scoped permission applies only to that exact prefix.
-   Save the returned `run` path. Never replace it to escape an error.
+   Save the returned `run` path. Never replace it to escape an error. If start reports dirtiness
+   caused only by a task/control file you just created and no run was created, move or remove only
+   that exact file and retry this same start once. Never create a worktree to recover from your own
+   control file.
 
 2. Inspect repository instructions, source and real run/test commands. Define the smallest useful
-   deliverable and executable acceptance. Prepare a compact plan in the run directory:
+   deliverable and executable acceptance. Prepare the plan only at `<run>/plan.json`—never at the
+   repository root:
    ```json
    {"deliverable":"working requested result",
     "acceptance":["specific observable outcome"],
