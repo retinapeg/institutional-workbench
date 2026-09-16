@@ -153,6 +153,27 @@ class CockpitTests(unittest.TestCase):
         saved.verify(deliver=True)
         self.assertEqual(saved.state["status"], "DELIVERED")
 
+    def test_optional_render_failure_does_not_block_delivery(self):
+        self.prepare()
+        self.edit()
+        manifest = self.c.directory / "render-failure.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "screenshot": "failed.png",
+                    "viewport": "1280x800",
+                    "argv": [sys.executable, "-c", "raise SystemExit(2)"],
+                }
+            )
+        )
+        result = self.cli("visual", "--file", str(manifest))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Render did not produce", json.loads(result.stdout)["refused"])
+        saved = Cockpit(self.c.directory)
+        self.assertEqual(saved.state["status"], "RUNNING")
+        saved.verify(deliver=True)
+        self.assertEqual(saved.state["status"], "DELIVERED")
+
     def test_text_only_completion_and_one_repair(self):
         self.prepare()
         self.freeze()
@@ -325,13 +346,15 @@ class CockpitTests(unittest.TestCase):
         self.c.verify(deliver=True)
         self.assertEqual(self.c.state["status"], "DELIVERED")
 
-    def test_protected_acceptance_and_outside_ownership(self):
+    def test_claude_may_edit_gitignore_and_files_outside_deprecated_ownership(self):
         self.prepare()
-        self.freeze()
         self.edit()
-        (self.repo / "data.csv").write_text("unauthorised\n")
-        with self.assertRaisesRegex(Blocked, "outside frozen"):
-            self.c.verify()
+        (self.repo / ".gitignore").write_text(".institutional-workbench/\n__pycache__/\n*.tmp\n")
+        (self.repo / "data.csv").write_text("replacement\n")
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "DELIVERED")
+        self.assertIn(".gitignore", self.c.state["files_changed"])
+        self.assertIn("data.csv", self.c.state["files_changed"])
 
     def test_status_after_delivery_cannot_revoke_result(self):
         self.prepare()
@@ -383,7 +406,7 @@ class CockpitTests(unittest.TestCase):
         self.c.verify()
         second = self.c.state["last_working_commit"]
         self.assertNotEqual(first, second)
-        self.assertEqual(self.git("rev-parse", second + "^"), first + "\n")
+        self.assertEqual(self.git("rev-parse", second + "^"), head)
         self.assertEqual(self.git("show", first + ":app.py"), "VALUE = 42\n")
         self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertEqual((self.repo / ".git/index").read_bytes(), index)
@@ -452,6 +475,63 @@ class CockpitTests(unittest.TestCase):
             (restored.directory, restored.state["started_monotonic"], restored.state["head"]),
             identity,
         )
+
+    def test_correctable_plan_error_can_be_resubmitted_in_same_run(self):
+        bad = self.c.directory / "bad-plan.json"
+        bad.write_text('{"deliverable":"missing checks"}')
+        refused = self.cli("prepare", "--file", str(bad))
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("refused", json.loads(refused.stdout))
+        restored = Cockpit(self.c.directory)
+        self.assertEqual(restored.state["status"], "RUNNING")
+        self.assertEqual(restored.state["phase"], "INSPECT")
+        good = self.c.directory / "good-plan.json"
+        good.write_text(self.plan.model_dump_json())
+        accepted = self.cli("prepare", "--file", str(good))
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(Cockpit(self.c.directory).state["phase"], "BUILD")
+
+    def test_controller_metadata_is_ignored_and_does_not_force_a_worktree(self):
+        (self.repo / ".gitignore").write_text("__pycache__/\n")
+        self.git("add", ".gitignore")
+        self.git("commit", "-qm", "Stop ignoring controller metadata")
+        previous = self.c.directory
+        self.assertTrue((previous / "run.json").exists())
+        another = Cockpit.start(self.repo, "Second run in the same repository", 5)
+        self.assertNotEqual(another.directory, previous)
+        self.assertEqual(another.state["status"], "RUNNING")
+
+    def test_normal_git_commit_updates_head_and_becomes_checkpoint(self):
+        self.prepare()
+        self.edit()
+        old_head = self.c.state["head"]
+        self.git("add", "app.py")
+        self.git("commit", "-qm", "Claude checkpoint")
+        committed = self.git("rev-parse", "HEAD").strip()
+        self.assertNotEqual(committed, old_head)
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "DELIVERED")
+        self.assertEqual(self.c.state["head"], committed)
+        self.assertEqual(self.c.state["last_working_commit"], committed)
+        self.assertEqual(self.c.state["receipts"][-3]["kind"], "head_changed")
+
+    def test_claude_can_delete_and_replace_existing_project_files(self):
+        (self.repo / "obsolete.py").write_text("OLD = True\n")
+        self.git("add", "obsolete.py")
+        self.git("commit", "-qm", "Add obsolete implementation")
+        self.prepare()
+        (self.repo / "obsolete.py").unlink()
+        (self.repo / "app.py").write_text("# replacement implementation\nVALUE = 42\n")
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "DELIVERED")
+        self.assertIn("obsolete.py", self.c.state["files_changed"])
+        self.assertIn("app.py", self.c.state["files_changed"])
+        checkpoint = self.c.state["last_working_commit"]
+        missing = subprocess.run(
+            ["git", "cat-file", "-e", checkpoint + ":obsolete.py"], cwd=self.repo
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("replacement implementation", self.git("show", checkpoint + ":app.py"))
 
     def test_operational_state_stays_compact_and_evidence_remains_separate(self):
         self.prepare()

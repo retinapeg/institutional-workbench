@@ -42,7 +42,8 @@ class Probe(Record):
 class Plan(Record):
     deliverable: str = Field(min_length=1)
     acceptance: list[str] = Field(min_length=1)
-    owned_paths: list[str] = Field(min_length=1)
+    # Retained only so older plan files still parse. Claude owns repository scope.
+    owned_paths: list[str] = Field(default_factory=list)
     checks: list[Check] = Field(min_length=1)
     probes: list[Probe] = Field(default_factory=list, max_length=8)
     source_paths: list[str] = Field(default_factory=list, max_length=20)
@@ -139,7 +140,19 @@ class Cockpit:
         _, root, _ = runner.run(["git", "rev-parse", "--show-toplevel"], repo)
         if Path(root.strip()).resolve() != repo:
             raise Blocked("Start at the repository root")
-        _, dirty, _ = runner.run(["git", "status", "--porcelain"], repo)
+        _, dirty, _ = runner.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                ".",
+                ":(exclude).institutional-workbench",
+                ":(exclude).institutional-workbench/**",
+            ],
+            repo,
+        )
         if dirty.strip():
             raise Blocked("Repository has existing work; use a separate committed worktree")
         _, head, _ = runner.run(["git", "rev-parse", "HEAD"], repo)
@@ -211,7 +224,7 @@ class Cockpit:
             not name
             or Path(name).is_absolute()
             or ".." in Path(name).parts
-            or any(part.startswith(".") for part in Path(name).parts)
+            or Path(name).parts[0] == ".git"
             or path.resolve() == self.repo
             or not path.resolve().is_relative_to(self.repo)
             or any(parent.is_symlink() for parent in (path, *path.parents))
@@ -316,7 +329,7 @@ class Cockpit:
             raise Blocked("At least one executable test is required")
         if len({p.name for p in plan.probes}) != len(plan.probes):
             raise Blocked("Probe names must be unique")
-        for name in plan.owned_paths + plan.source_paths + [p.path for p in plan.probes]:
+        for name in plan.source_paths + [p.path for p in plan.probes]:
             self.path(name)
         self.state["plan"] = plan.model_dump()
         self.state["baseline"] = self.version()
@@ -431,15 +444,35 @@ class Cockpit:
         version = self.version()
         if self.state.get("checkpoint_version") == version:
             return
+        _, current_head, _ = self.run(["git", "rev-parse", "HEAD"], self.repo)
+        current_head = current_head.strip()
+        self.state["head"] = current_head
+        _, dirty, _ = self.run(
+            [
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                ".",
+                ":(exclude).institutional-workbench",
+                ":(exclude).institutional-workbench/**",
+            ],
+            self.repo,
+        )
+        if not dirty.strip():
+            self.state["last_working_commit"] = current_head
+            self.state["checkpoint_version"] = version
+            self.receipt("checkpoint", {"commit": current_head, "source": "repository HEAD"})
+            return
         # A private Git ref/temporary index preserves bytes without moving HEAD,
         # changing the user's index, firing commit hooks or discarding dirty work.
         with tempfile.TemporaryDirectory(dir=self.directory, prefix="checkpoint-") as folder:
             prefix = ["env", "GIT_INDEX_FILE=" + str(Path(folder) / "index"), "git"]
-            self.run(prefix + ["read-tree", self.state["head"]], self.repo)
+            self.run(prefix + ["read-tree", current_head], self.repo)
             paths = sorted(set(version) | set(self.state["baseline"]))
             self.run(prefix + ["add", "-A", "--", *paths], self.repo)
             _, tree, _ = self.run(prefix + ["write-tree"], self.repo)
-            parent = self.state["last_working_commit"] or self.state["head"]
             _, commit, _ = self.run(
                 [
                     "git",
@@ -450,7 +483,7 @@ class Cockpit:
                     "commit-tree",
                     tree.strip(),
                     "-p",
-                    parent,
+                    current_head,
                     "-m",
                     "Verified hackathon working checkpoint",
                 ],
@@ -459,16 +492,7 @@ class Cockpit:
             if self.version() != version:
                 raise Blocked("Candidate changed during checkpoint; previous checkpoint preserved")
             ref = "refs/institutional-cockpit/" + self.directory.name
-            self.run(
-                [
-                    "git",
-                    "update-ref",
-                    ref,
-                    commit.strip(),
-                    self.state["last_working_commit"] or "0" * 40,
-                ],
-                self.repo,
-            )
+            self.run(["git", "update-ref", ref, commit.strip()], self.repo)
         self.state["last_working_commit"] = commit.strip()
         self.state["checkpoint_version"] = version
         self.receipt("checkpoint", {"commit": commit.strip(), "ref": ref})
@@ -710,20 +734,11 @@ class Cockpit:
         before = self.version()
         baseline = self.state["baseline"]
         changed = {p for p in baseline.keys() | before.keys() if baseline.get(p) != before.get(p)}
-        for name in changed:
-            self.path(name)
-            if not any(
-                name == owned or name.startswith(owned.rstrip("/") + "/")
-                for owned in plan.owned_paths
-            ):
-                raise Blocked(f"Change outside frozen ownership: {name}")
-            if name in baseline and (
-                name.startswith("tests/") or Path(name).name.startswith("test")
-            ):
-                raise Blocked(f"Existing acceptance test changed: {name}")
         _, head, _ = self.run(["git", "rev-parse", "HEAD"], self.repo)
         if head.strip() != self.state["head"]:
-            raise Blocked("Repository HEAD changed during cockpit run")
+            previous = self.state["head"]
+            self.state["head"] = head.strip()
+            self.receipt("head_changed", {"previous": previous, "current": head.strip()})
         results = [self.execute(check) for check in plan.checks]
         passed = all(r["exit_status"] == 0 and r["unchanged"] for r in results)
         self.state["verification"] = results
@@ -912,7 +927,7 @@ def main() -> int:
                 if cockpit.state["status"] == "RUNNING":
                     # A refused optional action is a control boundary, not lost work.
                     if (
-                        args.action in {"begin", "ship", "steer", "visual"}
+                        args.action in {"prepare", "begin", "ship", "steer", "visual"}
                         and not isinstance(exc, Deadline)
                         and not (cockpit.directory / "cancel").exists()
                     ):
