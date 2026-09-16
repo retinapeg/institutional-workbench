@@ -1,108 +1,101 @@
-# Claude-owned Hackathon preview
+# Claude-native Hackathon
 
-This opt-in path changes implementation ownership, not the existing Python router or CLI modes.
-Claude reads, edits, inspects renders and owns the final decision. The foreground Python helper
-collects actual evidence and runs frozen checks. Tool-disabled model workers only advise.
-The installed `/engineering` still reads `~/.claude/skills/hackathon/roundtable.md`; neither that
-file nor the installed skills/settings are changed by development or preview activation.
+Claude inspects, builds, tests and ships. External models optionally advise on a concrete question;
+there is no mandatory roundtable or external patch-writing builder. Director, Builder, Breaker and
+Shipper are four responsibilities of the same cockpit, not four persistent agents.
 
-## Preview without replacing anything
+## Use
 
-From a **clean, committed disposable Git repository**:
+In a clean, committed project, after activation:
+
+```text
+/hackathon Build a compelling interactive demo for this judging rubric in 8 hours: ...
+```
+
+No deadline means a stated 120-minute default. Empty `/hackathon` asks for a goal; it does not build.
+During the same run:
+
+```text
+STEER: The backend is good enough. Make the main interaction clearer and more impressive.
+/hackathon status
+deliver
+```
+
+Plain `status` also requests the operational view. Claude's reserved `/status` remains unchanged.
+
+## Isolated preview and activation
+
+Before replacing any installed skill, launch from a disposable clean repository:
 
 ```sh
 claude --plugin-dir /Users/leonardaarons-ditson/Code/institutional-workbench-routing/claude/cockpit
 ```
 
-Then type:
+Use `/institutional-cockpit:hackathon <goal> in <minutes> minutes` there. No permission grants or
+global settings changes are bundled. Activate only after the realistic isolated smoke passes:
+back up `~/.claude/skills/hackathon/SKILL.md`, replace **only that file** with
+`claude/cockpit/skills/hackathon/SKILL.md`, then test empty `/hackathon` in a fresh Claude session.
+Restore the saved file to roll back. Keep the sibling `roundtable.md`: `/engineering` uses it.
+Do not replace a skill underneath another active user's run.
 
-```text
-/institutional-cockpit:hackathon Add a rank_three(a,b,c) Python function returning descending values, with duplicate and negative-value tests, in 5 minutes.
-```
+## The loop and its limits
 
-The namespace avoids collision with the currently installed `/hackathon`. No permission grants
-are bundled. Ordinary Claude permissions apply to edits and controller commands; respond to a
-genuine permission request normally. No global tool install, settings change or restart required.
+Inspect briefly → define observable acceptance → build → run real tests/demo → checkpoint → improve
+the most visible weakness → ship. `prepare` begins BUILD immediately. No freeze or adviser call is
+required. Per iteration, at most two advisers and one optional challenge; one focused implementation
+repair before a failing iteration blocks. Adviser failure never erases a working demo.
 
-## Activate the short `/hackathon` name when YOU are ready
+The foreground helper maintains `.institutional-workbench/cockpit-*/run.json`: deadline, phase,
+checklists, risks, current/next action, steering, evidence and last-working checkpoint. No hidden
+reasoning is stored. `status --human` is the readable view; keep evidence local if it includes
+private source or output. `steer` records priorities for the next safe operation boundary without a
+new run. Thirty minutes without an artifact forces execution, not another conference.
 
-Do this only after the active interview-preparation Claude session is finished. Claude watches
-personal skills live. Keep the existing sibling `roundtable.md` because `/engineering` uses it.
+Frozen checks run on actual files. Existing tests and ownership stay protected. `verify` saves a
+working Git checkpoint without moving the current branch/index and continues; `verify --deliver`
+finishes with an evidence-based result. New risky work requires a working checkpoint. Failed later
+changes do not erase it. There are no destructive resets, automatic merges or pushes.
+Inspect/recover a saved checkpoint in a separate Git worktree at its recorded SHA, never by resetting
+the active checkout. Complete all source/document edits before final screenshot capture; later file
+changes correctly invalidate that screenshot. Recording an existing shipping manifest is read-only.
 
-```sh
-backup_dir=$(mktemp -d /tmp/institutional-hackathon-skill-backup.XXXXXX)
-cp /Users/leonardaarons-ditson/.claude/skills/hackathon/SKILL.md "$backup_dir/SKILL.md"
-cp /Users/leonardaarons-ditson/Code/institutional-workbench-routing/claude/cockpit/skills/hackathon/SKILL.md /Users/leonardaarons-ditson/.claude/skills/hackathon/SKILL.md
-```
+Deadline policy: T−90 feature freeze, T−60 stabilise/present, T−30 no risky changes. Short runs scale
+these to 25%, 16.7% and 8.3%. Checks happen at native operation boundaries; this is **not a sandbox**
+and cannot interrupt Claude's in-flight Edit/Read. Helper subprocesses and native commands retain
+bounded timeouts. Budget expiry preserves work rather than pretending the definition of done passed.
 
-Start a new Claude session in the intended repository and type:
+Shipper records README, pitch, submission, fallback, screenshots and public-URL status. It checks a
+provided URL's HTTP reachability; Claude still exercises the real interaction. Screenshot capture
+is evidence, not a layout judgement. Missing required assets/visual proof stay explicit. Deployment
+uses only authorised destinations; no account changes, purchases, secrets or fabricated integrations.
 
-```text
-/hackathon Add a rank_three(a,b,c) Python function returning descending values, with duplicate and negative-value tests, in 5 minutes.
-```
+`DELIVERED` means the frozen checks and required shipping evidence pass. `PARTIAL`, `BLOCKED` and
+`DEADLINE` preserve useful work and name what is unverified. Native permissions still apply.
 
-To undo, copy the saved `SKILL.md` back. Do not replace the entire skill directory.
-
-## Evidence and bounded control
-
-- `start` begins a monotonic **explicit hard** budget before source inspection; no invented deadline
-  for maintenance. Legacy Python CLI soft deadlines/CRUNCH remain unchanged.
-- `prepare` freezes cockpit-authored ownership, tests/demo argv and named read/CSV probes. It runs
-  baseline checks against real files. These argv lists require cockpit/user authority; they are not
-  a sandbox and must never be copied blindly from adviser output.
-- `advice` uses the existing task profiler, role selector (zero for trivial work, otherwise max two),
-  model registry and cost-zero capability router. Independent calls see no peer reports; one
-  challenge sees the completed first round. Total deliberation cutoff is 15% of the run, including
-  inspection; each provider child is bounded to the remaining allowance, max 90 seconds. At most
-  one local operational escalation per adviser call. EPERM is not retried. Optional adviser
-  unavailability returns control to Claude. There is no model-builder phase in this path.
-- `probe` resolves only configured names, max twice each. CSV header checks are stdlib-only. For
-  Parquet use an already-available authorised native query and retain its result; this helper does
-  not install a database or silently send private data to a provider.
-- `freeze` retains decisions, disagreements and observed receipt quotations. It checks that quotes
-  actually exist and evidence is current. Claude must still check whether the inference is valid;
-  this is not an automatic semantic judge. Essential blockers stop execution; optional unknowns
-  should narrow scope or be deferred.
-- Claude is the only writer. `status` supplies remaining time and native command timeout; last 25%
-  is validation-only. Native tools must obey these boundaries. The helper cannot forcibly interrupt
-  an in-flight Claude Edit/Read. Its own commands are terminated via the existing process-group
-  runner. User cancellation writes only this run's cancellation file, even during an active call.
-- `verify` executes frozen checks. Original tests and out-of-scope files are protected; a check
-  changing source invalidates its own evidence. Exactly one implementation repair. A no-op needs
-  baseline and final acceptance to pass. Concurrent writes are unsupported: use one writer per
-  physical worktree. No reset, checkout, commit, push or automatic merge occurs.
-- `visual` executes an authorised render command, records a newly produced PNG, viewport, hash and
-  source version. CAPTURED_NOT_INTERPRETED does **not** assert layout correctness. Claude must view
-  the screenshot. Missing/stale required rendering means PARTIAL after executable checks pass.
-
-`DELIVERED`: actual frozen checks passed against the candidate; separately inspect visual status.
-`PARTIAL`: executable evidence exists but required visual verification is missing.
-`DEADLINE`: budget expired; files and receipts retained, no verified-completion claim.
-`BLOCKED`: a necessary operation/permission/check cannot proceed safely or one repair failed.
-Provider prose, a proposed patch, and a model confidence score cannot create these test receipts.
-
-Run evidence lives in `.institutional-workbench/cockpit-*/run.json`. Keep it local: authorised argv,
-source excerpts and command output may be sensitive. No automatic publication or account metadata.
-
-## EPERM: established versus inferred
-
-The inherited `100145d` regression reproduces an EPERM during `os.killpg(pid, 0)` cleanup masking
-a primary timeout, and preserves that timeout. The original field run had no syscall trace, so
-its exact syscall is **not retrospectively established**. This preview does not claim otherwise.
-New host-operation failures retain phase, attempted argv, cwd, errno, status (unknown when no
-result), and error; successful/failed completed commands retain stderr. A broad `Runner.run`
-failure alone still cannot distinguish launch from every cleanup syscall. No protection is disabled.
-
-## Checks
+## Verify development changes
 
 ```sh
 uv run python -m unittest discover -s tests -q
-uvx ruff format --check src tests claude/hackathon/bridge.py
-uvx ruff check src tests claude/hackathon/bridge.py
-uvx --with 'pydantic>=2.10,<3' mypy --strict src claude/hackathon/bridge.py
+uvx ruff format --check src tests benchmarks claude/hackathon/bridge.py
+uvx ruff check src tests benchmarks claude/hackathon/bridge.py
+uvx --with 'pydantic>=2.10,<3' mypy --strict src benchmarks/run.py claude/hackathon/bridge.py
 uv build
 ```
 
-`test_cockpit.py` uses real temporary repositories, writes and subprocess tests, with mocked
-advisers. That is not Claude-host proof; the separately recorded isolated smoke supplies that
-integration layer when runtime credentials/permissions allow it.
+Deterministic temporary-repository tests are not live Claude proof. Keep the separate realistic
+smoke evidence, registration result and limitations explicit; do not rerun a user project to test
+this integration. The legacy Python CLI and `/engineering` are separate, unchanged paths.
+
+### Current verification — 16 September 2026
+
+115 deterministic tests, lint, strict typing and package build pass. The one live disposable
+Sonnet cockpit attempt repaired the seeded budget-conservation bug: first source edit at 37.9s,
+passing core/browser checks and working checkpoint by 51.2s. One injected steering instruction
+was read and followed with visible-interaction edits (Claude redundantly recorded it twice).
+Zero advisers were used. Original acceptance files and global settings/skills stayed unchanged.
+
+That attempt **did not complete**: an existing screenshot filename caused a fatal helper refusal;
+the run was stopped at 218.6s before shipping assets were produced. Its evidence remains at
+`/tmp/inst-hackathon-web-smoke.mGihG3/metrics.json`. The refusal is now nonterminal and regression
+tested; the skill explains fresh captures and safe stopping. A post-fix live recheck still needs
+approval. Global `/hackathon` has **not** been replaced; do not call this activated or live-proven.

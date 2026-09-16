@@ -9,7 +9,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from institutional_workbench.cockpit import Advice, Check, Cockpit, Freeze, Plan, Probe, Ruling
+from institutional_workbench.cockpit import (
+    Action,
+    Advice,
+    Check,
+    Cockpit,
+    Freeze,
+    Plan,
+    Probe,
+    Ruling,
+    Shipping,
+)
 from institutional_workbench.runner import Blocked, Deadline
 
 
@@ -57,7 +67,7 @@ class CockpitTests(unittest.TestCase):
             checks=[
                 Check(
                     name="unit",
-                    argv=[sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+                    argv=[sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests", "-v"],
                 )
             ],
             source_paths=["app.py"],
@@ -101,19 +111,55 @@ class CockpitTests(unittest.TestCase):
         self.prepare()
         self.freeze()
         self.edit()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["status"], "DELIVERED")
         self.assertEqual(self.c.state["files_changed"], ["app.py"])
         self.assertEqual(self.c.state["verification"][0]["exit_status"], 0)
         self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.c.state["head"])
 
+    def test_unverified_core_demo_cannot_claim_delivered(self):
+        self.plan.core_demo_checklist = ["main interaction"]
+        self.prepare()
+        self.edit()
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "PARTIAL")
+        self.assertIn(
+            "Core demo unverified: main interaction", self.c.state["final_report"]["remaining"]
+        )
+
+    def test_optional_visual_refusal_preserves_working_run_and_existing_image(self):
+        self.prepare()
+        self.edit()
+        self.c.verify()
+        checkpoint = self.c.state["last_working_commit"]
+        (self.repo / "new.png").write_bytes(b"existing user image")
+        manifest = self.c.directory / "render.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "screenshot": "new.png",
+                    "viewport": "1280x800",
+                    "argv": [sys.executable, "-c", "raise AssertionError('must not run')"],
+                }
+            )
+        )
+        result = self.cli("visual", "--file", str(manifest))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fresh screenshot", json.loads(result.stdout)["refused"])
+        saved = Cockpit(self.c.directory)
+        self.assertEqual(saved.state["status"], "RUNNING")
+        self.assertEqual(saved.state["last_working_commit"], checkpoint)
+        self.assertEqual((self.repo / "new.png").read_bytes(), b"existing user image")
+        saved.verify(deliver=True)
+        self.assertEqual(saved.state["status"], "DELIVERED")
+
     def test_text_only_completion_and_one_repair(self):
         self.prepare()
         self.freeze()
         self.c.state["reports"] = [{"message": "I implemented it and all tests pass"}]
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["phase"], "REPAIR")
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["status"], "BLOCKED")
         self.assertEqual(self.c.state["repairs"], 1)
 
@@ -121,7 +167,7 @@ class CockpitTests(unittest.TestCase):
         self.edit()
         self.prepare()
         self.freeze()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["build"], "NO CHANGES REQUIRED")
 
     def test_named_schema_probe_resolves_fact_without_models(self):
@@ -132,7 +178,7 @@ class CockpitTests(unittest.TestCase):
             self.c.probe("sh -c arbitrary-command")
         self.freeze()
         self.edit()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["calls"], 0)
         self.assertEqual(self.c.state["status"], "DELIVERED")
 
@@ -166,7 +212,7 @@ class CockpitTests(unittest.TestCase):
             Freeze(implementation=["Fix VALUE"], unresolved=["Optional data unavailable"])
         )
         self.edit()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["status"], "DELIVERED")
 
     def test_stale_or_fabricated_evidence_cannot_freeze(self):
@@ -189,28 +235,28 @@ class CockpitTests(unittest.TestCase):
     def test_independence_one_challenge_and_role_cap(self):
         self.prepare()
         provider = Adviser()
-        self.c.advice(provider)
+        self.c.advice(provider, question="Implement a correct data utility", challenge=True)
         self.assertEqual(len(self.c.state["roles"]), 2)
-        self.assertEqual(len(provider.requests), 4)
+        self.assertEqual(len(provider.requests), 3)
         for request in provider.requests[:2]:
             self.assertNotIn("peer_reports", request)
         for request in provider.requests[2:]:
             self.assertEqual(len(request["peer_reports"]), 2)
         with self.assertRaisesRegex(Blocked, "One independent"):
-            self.c.advice(provider)
+            self.c.advice(provider, question="Implement a correct data utility")
 
     def test_trivial_task_skips_optional_models(self):
         self.c.state["task"] = "Fix literal typo"
         self.prepare()
         provider = Adviser()
-        self.c.advice(provider)
+        self.c.advice(provider, question="Fix literal typo")
         self.assertEqual(provider.requests, [])
 
     def test_optional_top_tier_failure_does_not_block(self):
         self.c.state["task"] = "Frontier mathematical physics problem"
         self.prepare()
         provider = Adviser(Blocked("Unavailable"))
-        self.c.advice(provider)
+        self.c.advice(provider, question="Frontier mathematical physics problem")
         self.assertLessEqual(len(provider.requests), 4)
         self.assertEqual(self.c.state["status"], "RUNNING")
         self.freeze()
@@ -251,19 +297,19 @@ class CockpitTests(unittest.TestCase):
         self.prepare()
         self.c.state["started_monotonic"] -= 240
         provider = Adviser()
-        self.c.advice(provider)
+        self.c.advice(provider, question="Implement a correct data utility")
         self.assertEqual(provider.requests, [])
-        self.assertEqual(self.c.view()["next_action"], "VALIDATE_ONLY")
+        self.assertEqual(self.c.view()["deadline_phase"], "FEATURE_FREEZE")
         self.freeze()
 
     def test_visual_unavailable_is_partial_only_after_tests_pass(self):
         self.plan.visual_required = True
         self.prepare()
         self.freeze()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["phase"], "REPAIR")
         self.edit()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["status"], "PARTIAL")
         self.assertEqual(self.c.state["visual"]["status"], "UNVERIFIED")
 
@@ -276,7 +322,7 @@ class CockpitTests(unittest.TestCase):
         self.assertEqual(self.c.state["visual"]["status"], "CAPTURED_NOT_INTERPRETED")
         self.assertEqual(self.c.state["visual"]["viewport"], "1280x800")
         # Deliberately only a fake render here: the status must not claim verified layout.
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.assertEqual(self.c.state["status"], "DELIVERED")
 
     def test_protected_acceptance_and_outside_ownership(self):
@@ -291,12 +337,238 @@ class CockpitTests(unittest.TestCase):
         self.prepare()
         self.freeze()
         self.edit()
-        self.c.verify()
+        self.c.verify(deliver=True)
         self.c.state["started_monotonic"] -= 1000
         self.c.save()
         result = self.cli("status")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stdout)["status"], "DELIVERED")
+
+    def test_prepare_starts_build_without_an_adviser_or_freeze_gate(self):
+        self.prepare()
+        self.assertEqual(self.c.state["phase"], "BUILD")
+        self.assertEqual(self.c.state["calls"], 0)
+        self.assertNotIn("decision", self.c.state)
+        self.edit()
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "DELIVERED")
+        self.assertEqual(self.c.state["calls"], 0)
+
+    def test_useful_advice_has_no_forced_challenge(self):
+        self.prepare()
+        provider = Adviser()
+        self.c.advice(provider)
+        self.assertEqual(provider.requests, [])
+        self.c.advice(provider, question="Which physical stability invariant must hold?")
+        self.assertEqual(len(provider.requests), 2)
+        self.assertTrue(all(r["phase"] == "INDEPENDENT" for r in provider.requests))
+        self.assertTrue(all("peer_reports" not in r for r in provider.requests))
+        self.assertEqual(self.c.state["phase"], "BUILD")
+
+    def test_working_checkpoints_are_recoverable_without_touching_head_or_index(self):
+        self.prepare()
+        self.assertEqual(self.c.state["last_working_commit"], "")
+        self.edit()
+        self.git("add", "app.py")
+        index = (self.repo / ".git/index").read_bytes()
+        head = self.git("rev-parse", "HEAD")
+        self.c.verify()
+        first = self.c.state["last_working_commit"]
+        self.assertEqual(self.c.state["status"], "RUNNING")
+        self.assertEqual(self.git("show", first + ":app.py"), "VALUE = 42\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual((self.repo / ".git/index").read_bytes(), index)
+        self.c.begin(Action(kind="polish", current_action="Clarify the implementation"))
+        (self.repo / "app.py").write_text("VALUE = 42  # Tested answer\n")
+        self.c.verify()
+        second = self.c.state["last_working_commit"]
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.git("rev-parse", second + "^"), first + "\n")
+        self.assertEqual(self.git("show", first + ":app.py"), "VALUE = 42\n")
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual((self.repo / ".git/index").read_bytes(), index)
+        self.assertEqual(self.c.state["iteration"], 1)
+
+    def test_failed_checks_never_replace_last_working_checkpoint(self):
+        self.prepare()
+        self.c.verify()
+        self.assertEqual(self.c.state["last_working_commit"], "")
+        self.assertEqual(self.c.state["breaker_findings"][-1]["exit_status"], 1)
+        self.assertIn("0 != 42", self.c.state["breaker_findings"][-1]["evidence"])
+        self.edit()
+        self.c.verify()
+        working = self.c.state["last_working_commit"]
+        self.c.begin(Action(kind="feature", current_action="Next visible improvement"))
+        (self.repo / "app.py").write_text("VALUE = -1\n")
+        self.c.verify()
+        self.assertEqual(self.c.state["last_working_commit"], working)
+        self.assertEqual(self.git("show", working + ":app.py"), "VALUE = 42\n")
+        self.assertEqual(self.c.state["phase"], "REPAIR")
+
+    def test_begin_cannot_reset_a_failed_iterations_repair_budget(self):
+        self.prepare()
+        self.c.verify()
+        with self.assertRaisesRegex(Blocked, "Repair and verify"):
+            self.c.begin(Action(kind="feature", current_action="Try to reset the allowance"))
+        self.c.begin(Action(kind="fix", current_action="Repair the actual failure"))
+        self.assertTrue(self.c.state["repair_used"])
+        self.assertEqual(self.c.state["repairs"], 1)
+        self.assertEqual(self.c.state["iteration"], 0)
+        self.c.verify()
+        self.assertEqual(self.c.state["status"], "BLOCKED")
+        self.assertEqual(self.c.state["repairs"], 1)
+
+    def test_optional_adviser_failure_preserves_working_build(self):
+        self.prepare()
+        self.edit()
+        self.c.verify()
+        working = self.c.state["last_working_commit"]
+        provider = Adviser(Blocked("Reviewer unavailable"))
+        self.c.advice(provider, question="Which numerical stability invariant matters?")
+        self.assertGreater(len(provider.requests), 0)
+        self.assertLessEqual(len(provider.requests), 4)
+        self.assertEqual(self.c.state["last_working_commit"], working)
+        self.assertEqual(self.c.state["status"], "RUNNING")
+        self.assertEqual((self.repo / "app.py").read_text(), "VALUE = 42\n")
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "DELIVERED")
+
+    def test_steering_reprioritizes_same_run_and_preserves_progress(self):
+        self.prepare()
+        self.edit()
+        self.c.verify()
+        identity = (self.c.directory, self.c.state["started_monotonic"], self.c.state["head"])
+        working = self.c.state["last_working_commit"]
+        instruction = "Stop backend work; make the visible interaction clearer"
+        self.c.steer(instruction)
+        restored = Cockpit(self.c.directory)
+        self.assertEqual(restored.state["next_action"], instruction)
+        self.assertFalse(restored.state["steering_requests"][-1]["applied"])
+        restored.begin(Action(kind="polish", current_action=instruction))
+        self.assertTrue(restored.state["steering_requests"][-1]["applied"])
+        self.assertEqual(restored.state["current_action"], instruction)
+        self.assertEqual(restored.state["last_working_commit"], working)
+        self.assertEqual(
+            (restored.directory, restored.state["started_monotonic"], restored.state["head"]),
+            identity,
+        )
+
+    def test_operational_state_stays_compact_and_evidence_remains_separate(self):
+        self.prepare()
+        self.c.receipt("probe", {"text": "visible source evidence " * 5000})
+        state = json.loads((self.c.directory / "run.json").read_text())
+        for key in ("receipts", "reports", "baseline", "baseline_checks", "plan"):
+            self.assertNotIn(key, state)
+            self.assertNotIn(key, self.c.view())
+        self.assertLess((self.c.directory / "run.json").stat().st_size, 10000)
+        self.assertLessEqual(len(state["recent_evidence"]), 12)
+        self.assertEqual(Cockpit(self.c.directory).state["receipts"][-1]["kind"], "probe")
+        human = self.c.human()
+        for label in ("DEADLINE:", "TIME REMAINING:", "CORE DEMO:", "SHIP:", "NEXT:"):
+            self.assertIn(label, human)
+
+    def test_long_budget_and_scaled_deadline_freezes(self):
+        long_run = Cockpit.start(self.repo, "Weekend demo", 24 * 60)
+        self.assertEqual(long_run.state["seconds"], 24 * 3600)
+        self.prepare()
+        self.c.state["seconds"] = 24 * 3600
+        for remaining, expected in (
+            (6000, "BUILD"),
+            (5400, "FEATURE_FREEZE"),
+            (3600, "POLISH_SHIP"),
+            (1800, "FINAL_VERIFY"),
+        ):
+            with (
+                self.subTest(remaining=remaining),
+                patch.object(self.c, "remaining", return_value=remaining),
+            ):
+                self.assertEqual(self.c.deadline_phase(), expected)
+        with patch.object(self.c, "remaining", return_value=5400):
+            with self.assertRaisesRegex(Blocked, "Feature freeze"):
+                self.c.begin(Action(kind="feature", current_action="Add speculative feature"))
+            self.c.begin(Action(kind="core", current_action="Finish essential interaction"))
+        with patch.object(self.c, "remaining", return_value=1800):
+            with self.assertRaisesRegex(Blocked, "T-30"):
+                self.c.begin(Action(kind="fix", risky=True, current_action="Risky late rewrite"))
+            self.c.begin(Action(kind="ship", current_action="Finish submission copy"))
+        self.c.state["seconds"] = 300
+        with patch.object(self.c, "remaining", return_value=60):
+            self.assertEqual(self.c.deadline_phase(), "FEATURE_FREEZE")
+
+    def test_artifact_stall_forces_execution_instead_of_advice(self):
+        self.prepare()
+        self.c.state["seconds"] = 6 * 3600
+        self.c.state["last_artifact_elapsed"] = 0
+        provider = Adviser()
+        with patch.object(self.c, "remaining", return_value=6 * 3600 - 1801):
+            self.assertTrue(self.c.force_execution())
+            self.c.advice(provider, question="Which physical stability invariant matters?")
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(self.c.state["phase"], "BUILD")
+
+    def test_risky_change_requires_current_working_checkpoint(self):
+        self.prepare()
+        with self.assertRaisesRegex(Blocked, "checkpoint"):
+            self.c.begin(Action(kind="feature", risky=True, current_action="Risky change"))
+        self.edit()
+        self.c.verify()
+        self.c.begin(Action(kind="feature", risky=True, current_action="Now safely preserved"))
+        (self.repo / "app.py").write_text("VALUE = 43\n")
+        with self.assertRaisesRegex(Blocked, "checkpoint"):
+            self.c.begin(Action(kind="feature", risky=True, current_action="Unverified change"))
+
+    def test_shipper_checks_assets_and_reports_url_failure_without_fake_deployment(self):
+        self.prepare()
+        with self.assertRaisesRegex(Blocked, "missing/empty"):
+            self.c.ship(Shipping(readme="missing.md", deployment_note="Local demo"))
+        with patch("institutional_workbench.cockpit.urlopen", side_effect=OSError("offline")):
+            self.c.ship(Shipping(demo_url="https://demo.example.invalid"))
+        self.assertEqual(self.c.state["url_status"], "UNVERIFIED")
+        self.assertEqual(self.c.state["url_failure"], "offline")
+        self.assertEqual(self.c.state["demo_url"], "https://demo.example.invalid")
+        self.assertEqual(self.c.state["status"], "RUNNING")
+
+    def test_required_shipping_assets_missing_produce_partial_definition_of_done_report(self):
+        self.plan.ship_required = ["readme", "submission"]
+        self.prepare()
+        self.edit()
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "PARTIAL")
+        report = self.c.state["final_report"]
+        self.assertEqual(report["definition_of_done"], self.plan.acceptance)
+        self.assertEqual(report["tests"], [{"name": "unit", "exit_status": 0}])
+        self.assertIn("Shipping asset missing/stale: readme", report["remaining"])
+        self.assertIn("Shipping asset missing/stale: submission", report["remaining"])
+        self.assertTrue(report["last_working_commit"])
+
+    def test_complete_shipping_assets_and_demo_are_delivered_with_evidence(self):
+        self.plan.ship_required = ["readme", "submission", "pitch", "fallback"]
+        self.plan.owned_paths.append("docs")
+        self.plan.checks.append(
+            Check(
+                name="demo", kind="demo", argv=[sys.executable, "-c", "import app;print(app.VALUE)"]
+            )
+        )
+        self.prepare()
+        self.edit()
+        (self.repo / "docs").mkdir()
+        for name in self.plan.ship_required:
+            (self.repo / "docs" / (name + ".md")).write_text("Run the verified local demo.\n")
+        self.c.ship(
+            Shipping(
+                readme="docs/readme.md",
+                submission="docs/submission.md",
+                pitch="docs/pitch.md",
+                fallback="docs/fallback.md",
+                deployment_note="No account authorised; documented local demo is the fallback",
+            )
+        )
+        self.c.verify(deliver=True)
+        self.assertEqual(self.c.state["status"], "DELIVERED")
+        self.assertEqual(self.c.state["demo_status"], "LOCAL ONLY")
+        self.assertEqual(self.c.state["url_status"], "NOT APPLICABLE")
+        self.assertEqual(self.c.state["final_report"]["remaining"], [])
+        self.assertTrue(self.c.state["ship_checklist"]["readme"][0]["sha256"])
 
     def test_lock_conflict_does_not_write_state_and_cancel_bypasses_lock(self):
         before = (self.c.directory / "run.json").read_bytes()
