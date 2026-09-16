@@ -1,0 +1,7 @@
+[
+  {"event_id":"e1","ticket_id":"A","timestamp":"2026-01-02T09:00:00Z","action":"opened","title":"Billing question","priority":"normal"},
+  {"event_id":"e2","ticket_id":"B","timestamp":"2026-01-02T11:40:00Z","action":"opened","title":"Service unavailable","priority":"urgent"},
+  {"event_id":"e3","ticket_id":"C","timestamp":"2026-01-02T08:00:00Z","action":"opened","title":"Resolved then reopened","priority":"urgent"},
+  {"event_id":"e4","ticket_id":"C","timestamp":"2026-01-02T10:00:00Z","action":"resolved"},
+  {"event_id":"e5","ticket_id":"C","timestamp":"2026-01-02T11:50:00Z","action":"reopened"}
+]
