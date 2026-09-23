@@ -27,7 +27,7 @@ flowchart TD
     BLD -->|"files"| TEST
     QA <-->|"results / fixes"| TEST
     TEST -->|"checked patch,<br/>git apply"| REPO
-    CALLS <-->|"prompt / JSON"| PROV
+    CALLS <--->|"prompt / JSON"| PROV
     FAKE -.->|"stands in"| CALLS
     DEV -.->|"status / cancel"| EV
 
