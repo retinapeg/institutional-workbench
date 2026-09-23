@@ -1,0 +1,56 @@
+$ inst --help
+usage: inst [-h] [--repo REPO] [--builder {claude,codex}]
+            [--reviewer {claude,codex}] [--claude-model CLAUDE_MODEL]
+            [--codex-model CODEX_MODEL] [--quick] [--test TEST]
+            [--minutes MINUTES]
+            {dev,hack,status,cancel} [task]
+
+Decide, build, test, deliver, stop.
+
+positional arguments:
+  {dev,hack,status,cancel}
+  task
+
+options:
+  -h, --help            show this help message and exit
+  --repo REPO
+  --builder {claude,codex}
+  --reviewer {claude,codex}
+  --claude-model CLAUDE_MODEL
+  --codex-model CODEX_MODEL
+  --quick               Routine task: builder only, no expert roundtable
+  --test TEST           Approved acceptance command; repeat for
+                        lint/build/demo checks
+  --minutes MINUTES
+
+$ python -m unittest discover -s tests -v -k test_delivery_independence
+test_delivery_independence_one_challenge_and_immediate_stop (test_workbench.WorkbenchTests.test_delivery_independence_one_challenge_and_immediate_stop) ... [1/7 INSPECT] Inspecting repository
+[2/7 INDEPENDENT] Software Engineer · codex
+[2/7 INDEPENDENT] codex finished
+[2/7 INDEPENDENT] Product Engineer · claude
+[2/7 INDEPENDENT] claude finished
+[2/7 CHALLENGE] Software Engineer · codex
+[2/7 CHALLENGE] codex finished
+[2/7 CHALLENGE] Product Engineer · claude
+[2/7 CHALLENGE] claude finished
+[3/7 DECIDE] Decision · codex
+[3/7 DECIDE] codex finished
+[4/7 BUILD] BuildTask · claude
+[4/7 BUILD] claude finished
+[5/7 TEST] Running frozen acceptance commands
+[6/7 RED TEAM] QAResult · codex
+[6/7 RED TEAM] codex finished
+[7/7 DELIVERED] Implemented answer
+ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.448s
+
+OK
+
+$ python -m unittest discover -s tests -b
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 4.875s
+
+OK

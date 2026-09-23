@@ -1,0 +1,48 @@
+%% Architecture of institutional-workbench at commit 0a6da5dba7dbf44082c02c451ab85e41f0b1ecd6
+%% Sources: src/institutional_workbench/cli.py, src/institutional_workbench/orchestrator.py, src/institutional_workbench/providers.py, src/institutional_workbench/runner.py, src/institutional_workbench/models.py, tests/test_workbench.py, pyproject.toml
+%% Render: npx @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/images/architecture.svg -b white
+flowchart TD
+    DEV(["Developer:<br/>inst dev | hack 'task'"])
+    CLI["cli.py + Workbench.run<br/>lock, time budget,<br/>cancel, ≤16 model calls"]
+    REPO[("Target Git repo<br/>clean, same HEAD")]
+    WT["Isolated git worktree<br/>snapshot ≤180k chars"]
+    EV[(".institutional-workbench/<br/>run.json, events, reports,<br/>tests.json, patch")]
+
+    subgraph CALLS["Model calls"]
+        ROUND["2 specialists: blind<br/>reports, 1 challenge each;<br/>reviewer freezes decision"]
+        BLD["Builder: complete<br/>changed files"]
+        QA["QA red team (1 pass),<br/>then ≤2 builder repairs"]
+    end
+
+    TEST["Host writes files, runs<br/>frozen acceptance<br/>commands in worktree"]
+    PROV["providers.py: local<br/>claude -p / codex exec (live),<br/>tools off, schema-checked"]
+    FAKE["FakeProvider<br/>(unit tests, mocked)"]
+
+    DEV --> CLI
+    CLI -->|"clean check"| REPO
+    CLI -->|"worktree add"| WT
+    CLI -->|"writes"| EV
+    WT -->|"snapshot"| ROUND
+    ROUND -->|"decision"| BLD
+    BLD -->|"files"| TEST
+    QA <-->|"results / fixes"| TEST
+    TEST -->|"checked patch,<br/>git apply"| REPO
+    CALLS <--->|"prompt / JSON"| PROV
+    FAKE -.->|"stands in"| CALLS
+    DEV -.->|"status / cancel"| EV
+
+    class DEV human
+    class CLI,WT det
+    class ROUND,BLD,QA ai
+    class TEST eval
+    class REPO,EV store
+    class PROV ext
+    class FAKE mock
+
+    classDef ai fill:#efe7fb,stroke:#6a4c93,stroke-width:2px,color:#2b1d45;
+    classDef det fill:#eef3f8,stroke:#2f5d8a,stroke-width:1.5px,color:#172c37;
+    classDef human fill:#e8f0ec,stroke:#285b48,stroke-width:1.5px,color:#173f32;
+    classDef eval fill:#f7efdf,stroke:#8b6330,stroke-width:1.5px,color:#4a3413;
+    classDef store fill:#f3f4f1,stroke:#65757b,stroke-width:1.5px,color:#172c37;
+    classDef ext fill:#ffffff,stroke:#2f5d8a,stroke-width:1.5px,stroke-dasharray:4 3,color:#172c37;
+    classDef mock fill:#ffffff,stroke:#9aa5a8,stroke-width:1.5px,stroke-dasharray:6 4,color:#65757b;
