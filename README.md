@@ -46,7 +46,7 @@ with every step logged under `.institutional-workbench/RUN_ID/`.
 ## Install
 
 Requires Python 3.11+, Git, uv, and logged-in local Claude and Codex CLIs.
-Developed against Claude 2.1.270 and Codex 0.154.0.
+Targets Claude CLI 2.1.270 and Codex CLI 0.154.0.
 
 ```sh
 uv tool install git+https://github.com/retinapeg/institutional-workbench
@@ -131,6 +131,6 @@ See VERIFICATION.md for the completed live health-endpoint run and exact limitat
 The separate [institutional-ai](https://github.com/retinapeg/institutional-ai)
 research repository is frozen. Verified MVP main:
 `5839bc65e2f041615d3256e9ce38bcd3c091d58a`.
-Unfinished research preserved on codex/live-workers-v1:
+Unfinished research is preserved at commit
 `7c3cd71ff4b2f00bd206b049d80982bdc58f7187`.
 This workbench reuses concepts, not that architecture. See FUTURE.md for deferred work.
